@@ -1248,6 +1248,20 @@ async function handlePdfFile(file) {
   await openBook(record.id);
 }
 
+// Самопочинка: при каждом заходе в библиотеку досылаем в чат книги, у которых
+// там ещё нет копии. Закрывает все случаи разом — книга добавлена до нажатия
+// Start у бота, не было сети, вебвью держал старую версию приложения. Дубли
+// исключены: сервер сверяет имя и размер, повтор вернёт уже существующий id.
+const chatSyncTried = new Set(); // не дёргать сервер повторно в рамках одной сессии
+async function syncLocalBooksToChat(books) {
+  if (!tg || !tg.initData) return;
+  for (const b of books) {
+    if (b.chatId || chatSyncTried.has(b.id)) continue;
+    chatSyncTried.add(b.id);
+    await uploadToChat(b);
+  }
+}
+
 // Тихая копия в чат бота: книга, добавленная здесь, появляется в «Из чата»
 // на остальных устройствах. Не блокирует открытие — уходит в фоне; если не
 // получилось (нет сети, файл больше лимита бота), книга остаётся локальной.
@@ -1299,6 +1313,7 @@ async function loadChatBooks(localBooks) {
   }
 
   const local = localBooks || await idbGetAllBooks();
+  syncLocalBooksToChat(local).catch(() => {});
   const have = new Set(local.map(b => b.chatId).filter(Boolean));
   const fresh = books.filter(b => !have.has(b.id));
   const list = document.getElementById('chatBooksList');
@@ -1370,7 +1385,9 @@ async function buildBookMeta(id, buf) {
   try {
     const meta = await doc.getMetadata();
     const info = meta && meta.info || {};
-    if (info.Title && info.Title.trim()) patch.title = info.Title.trim();
+    // Заголовок из метаданных НЕ берём: у греческих PDF он сплошь и рядом в
+    // битой кодировке («Δ53 Tem Θαν Συν τδ»), имя файла надёжнее. Автора
+    // оставляем — он и полезнее, и страдает реже.
     if (info.Author && info.Author.trim()) patch.author = info.Author.trim();
   } catch {}
 
