@@ -436,6 +436,12 @@
   </div>
   <div class="chips" id="filterChips"></div>
   <div id="libraryBody"></div>
+  <!-- Книги, присланные в чат бота; наполняется только внутри Telegram -->
+  <div id="chatBooksWrap" style="display:none">
+    <div class="set-label" style="margin:18px 0 10px">Из чата</div>
+    <div class="list" id="chatBooksList"></div>
+    <div class="set-hint">Пришли боту PDF в чат — книга появится здесь на всех устройствах.</div>
+  </div>
   <input type="file" id="pdfFileInput" accept="application/pdf">
 </div>
 
@@ -1048,6 +1054,7 @@ async function renderLibrary() {
   const body = document.getElementById('libraryBody');
   const chipsEl = document.getElementById('filterChips');
   const searchWrap = document.querySelector('.search-wrap');
+  loadChatBooks(books).catch(() => {});
 
   if (!books.length) {
     chipsEl.style.display = 'none';
@@ -1214,25 +1221,126 @@ let chromeVisible = true;
 let currentBookId = null;
 let currentBook = null;
 
-async function handlePdfFile(file) {
-  if (!file) return;
-  const buf = await file.arrayBuffer();
+async function addBookFromBuffer(name, buf, extra = {}) {
   const record = {
-    id: newId(), name: file.name, data: buf,
+    id: newId(), name, data: buf,
     // Отпечаток файла — по нему книга находит свои заметки в облаке даже
     // после переустановки, когда id записи будет уже другой.
-    fp: fileFingerprint(file.name, buf.byteLength),
-    title: stripExt(file.name), author: '',
+    fp: fileFingerprint(name, buf.byteLength),
+    title: stripExt(name), author: '',
     coverDataUrl: null, coverIsOwn: false,
     addedAt: Date.now(), lastOpenedAt: Date.now(),
     status: 'reading', favorite: false, archived: false,
     scrollPos: 0, currentPage: 1, pageCount: 0,
     sourceLang: localStorage.getItem(STORAGE_SOURCE_LANG) || 'el',
     bookmarks: [], notes: [],
+    ...extra,
   };
   await idbAddBook(record);
   buildBookMeta(record.id, buf).catch(() => {});
+  return record;
+}
+
+async function handlePdfFile(file) {
+  if (!file) return;
+  const record = await addBookFromBuffer(file.name, await file.arrayBuffer());
   await openBook(record.id);
+}
+
+// ══════════════════════════════════════════════════════════════
+// КНИГИ ИЗ ЧАТА БОТА
+// ══════════════════════════════════════════════════════════════
+// PDF, присланные в чат @norevia_bot, лежат у Telegram; воркер отдаёт их
+// список и сами файлы, проверяя подпись initData — поэтому раздел существует
+// только внутри Telegram. Скачанная книга помечается chatId и из списка
+// пропадает; если локальную копию удалить, книга снова появится в «Из чата».
+const SERVER_URL = 'https://norevia.norevia.workers.dev';
+
+function serverFetch(path, opts = {}) {
+  return fetch(SERVER_URL + path, {
+    ...opts,
+    headers: { 'X-Tg-Init-Data': tg.initData, ...(opts.headers || {}) },
+  });
+}
+
+const chatDownloading = new Set();
+
+async function loadChatBooks(localBooks) {
+  const wrap = document.getElementById('chatBooksWrap');
+  if (!tg || !tg.initData) { wrap.style.display = 'none'; return; }
+  let books;
+  try {
+    const r = await serverFetch('/books');
+    if (!r.ok) throw new Error('http ' + r.status);
+    books = (await r.json()).books || [];
+  } catch (e) {
+    console.warn('список из чата не загрузился', e);
+    wrap.style.display = 'none';
+    return;
+  }
+
+  const local = localBooks || await idbGetAllBooks();
+  const have = new Set(local.map(b => b.chatId).filter(Boolean));
+  const fresh = books.filter(b => !have.has(b.id));
+  const list = document.getElementById('chatBooksList');
+  if (!fresh.length) { wrap.style.display = 'none'; list.innerHTML = ''; return; }
+
+  list.innerHTML = '';
+  fresh.forEach(b => {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const main = document.createElement('div');
+    main.className = 'row-main';
+    main.innerHTML = `<div class="row-title"></div><div class="row-sub"></div>`;
+    main.querySelector('.row-title').textContent = stripExt(b.name);
+    main.querySelector('.row-sub').textContent = [fmtSize(b.size), 'нажми, чтобы скачать'].filter(Boolean).join(' · ');
+    main.addEventListener('click', () => downloadChatBook(b, row));
+    const del = document.createElement('button');
+    del.className = 'row-del';
+    del.type = 'button';
+    del.setAttribute('aria-label', 'Убрать из списка');
+    del.innerHTML = icon('trash', 'icon-sm');
+    del.addEventListener('click', async e => {
+      e.stopPropagation();
+      try {
+        await serverFetch('/books/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: b.id }),
+        });
+      } catch {}
+      row.remove();
+      if (!list.children.length) wrap.style.display = 'none';
+    });
+    row.append(main, del);
+    list.append(row);
+  });
+  wrap.style.display = '';
+}
+
+function fmtSize(bytes) {
+  if (!bytes) return '';
+  const mb = bytes / 1048576;
+  return mb >= 1 ? mb.toFixed(1).replace('.', ',') + ' МБ' : Math.max(1, Math.round(bytes / 1024)) + ' КБ';
+}
+
+async function downloadChatBook(b, row) {
+  if (chatDownloading.has(b.id)) return;
+  chatDownloading.add(b.id);
+  const sub = row.querySelector('.row-sub');
+  sub.textContent = 'Скачиваю…';
+  try {
+    const r = await serverFetch('/file?id=' + encodeURIComponent(b.id));
+    if (!r.ok) throw new Error('http ' + r.status);
+    const buf = await r.arrayBuffer();
+    const record = await addBookFromBuffer(b.name, buf, { chatId: b.id });
+    await openBook(record.id);
+  } catch (e) {
+    console.warn('скачивание не удалось', e);
+    sub.textContent = 'Не получилось скачать — попробуй ещё раз';
+  } finally {
+    chatDownloading.delete(b.id);
+  }
 }
 
 // Метаданные и обложка считаются в фоне: открытие книги не должно их ждать.
