@@ -194,6 +194,7 @@
   .tabbar {
     position: sticky; bottom: 0; z-index: 35;
     display: none; justify-content: space-around; align-items: stretch;
+    background: var(--surface);
     background: color-mix(in srgb, var(--surface) 92%, transparent);
     backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
     border-top: 1px solid var(--border);
@@ -228,7 +229,7 @@
   }
   .highlight-layer { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
   .hl-rect { position: absolute; border-radius: 2px; }
-  .hl-rect-preview { background: color-mix(in srgb, var(--accent) 32%, transparent); }
+  .hl-rect-preview { background: var(--accent-soft); background: color-mix(in srgb, var(--accent) 32%, transparent); }
   /* Официальные правила pdf.js для текстового слоя — без них слой либо
      виден поверх картинки, либо не совпадает по размеру с глифами. */
   .textLayer {
@@ -337,6 +338,7 @@
     position: sticky; top: 0; z-index: 30;
     display: flex; align-items: center; gap: 4px;
     padding: calc(env(safe-area-inset-top, 0px) + 12px) 0.75rem 12px;
+    background: var(--bg);
     background: color-mix(in srgb, var(--bg) 90%, transparent);
     backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--border);
@@ -361,7 +363,9 @@
 
   .page-indicator {
     position: sticky; bottom: 16px; align-self: center;
-    background: color-mix(in srgb, var(--text) 78%, transparent); color: var(--bg);
+    background: var(--text);
+    background: color-mix(in srgb, var(--text) 78%, transparent);
+    color: var(--bg);
     font-size: 12px; font-weight: 700;
     padding: 6px 13px; border-radius: 20px;
     z-index: 30; border: none; cursor: pointer; font-family: inherit;
@@ -506,7 +510,7 @@
     font-size: 12px; font-weight: 800; color: var(--muted); text-transform: uppercase;
     letter-spacing: 0.05em; padding: 14px 2px 2px;
   }
-  .copy-feedback { text-align: center; font-size: 13px; color: var(--accent); font-weight: 700; height: 18px; margin-top: 8px; }
+  .copy-feedback { text-align: center; font-size: 13px; color: var(--accent); font-weight: 700; min-height: 16px; margin: -6px 0 8px; }
 
   /* ══════════════ НАСТРОЙКИ ══════════════ */
   .set-group { margin-bottom: 22px; }
@@ -569,6 +573,7 @@
     <button class="chrome-btn chrome-zoom" id="chromeFontMinus" type="button" aria-label="Меньше шрифта">A−</button>
     <button class="chrome-btn chrome-zoom" id="chromeFontPlus" type="button" aria-label="Больше шрифта">A+</button>
     <button class="chrome-btn" id="chromeReadMode" type="button" aria-label="Текстовый режим"></button>
+    <button class="chrome-btn" id="chromeToc" type="button" aria-label="Оглавление и поиск"></button>
     <button class="chrome-btn" id="chromeBookmark" aria-label="Добавить закладку"></button>
     <button class="chrome-btn" id="chromeMenu" aria-label="Меню книги"></button>
   </div>
@@ -755,6 +760,7 @@ const ICONS = {
   reading: '<path d="M12 7v13"/><path d="M4 5.5A18 18 0 0 1 12 7a18 18 0 0 1 8-1.5v13A18 18 0 0 0 12 20a18 18 0 0 0-8-1.5v-13Z"/>',
   want: '<circle cx="12" cy="12" r="8"/><path d="M12 8v4l2.5 2"/>',
   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a1 1 0 0 1 1-1h9"/>',
+  toc: '<path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h10"/>',
 };
 const icon = (name, cls = '') => S(ICONS[name], cls ? ' ' + cls : '');
 
@@ -3469,15 +3475,17 @@ function renderWordsList() {
     row.append(main, del);
     list.append(row);
   });
+  // Кнопка сверху: список слов бывает длинным, и искать её под ним, каждый раз
+  // пролистывая всё до конца, неудобно.
   const copy = document.createElement('button');
   copy.className = 'btn-outline';
-  copy.style.cssText = 'margin:16px auto 0;display:flex';
+  copy.style.cssText = 'margin:0 auto 14px;display:flex';
   copy.innerHTML = icon('copy') + 'Скопировать список';
   copy.addEventListener('click', copySavedWords);
   const fb = document.createElement('div');
   fb.className = 'copy-feedback';
   fb.id = 'copyFeedback';
-  body.append(list, copy, fb);
+  body.append(copy, fb, list);
 }
 
 async function copySavedWords() {
@@ -3640,6 +3648,7 @@ document.getElementById('chromeBookmark').addEventListener('click', addBookmark)
 document.getElementById('chromeMenu').addEventListener('click', () => currentBookId && openBookSheet(currentBookId));
 document.getElementById('chromeReadMode').addEventListener('click', () => switchReadMode(readMode === 'flow' ? 'page' : 'flow'));
 document.getElementById('pageIndicator').addEventListener('click', openNavSheet);
+document.getElementById('chromeToc').addEventListener('click', openNavSheet);
 let navSearchTimer = null;
 document.getElementById('navSearch').addEventListener('input', e => {
   const q = e.target.value;
@@ -3703,6 +3712,7 @@ document.getElementById('chromeBack').innerHTML = icon('back');
 document.getElementById('chromeBookmark').innerHTML = icon('bookmark');
 document.getElementById('jumpClose').innerHTML = icon('close', 'icon-sm');
 document.getElementById('chromeMenu').innerHTML = icon('more');
+document.getElementById('chromeToc').innerHTML = icon('toc');
 document.getElementById('tpClose').innerHTML = icon('close', 'icon-sm');
 applyAppearance();
 renderSelColors();
