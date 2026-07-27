@@ -265,7 +265,6 @@
   .chrome-btn { background: none; border: none; cursor: pointer; color: var(--text); padding: 7px; border-radius: 10px; display: flex; }
   .chrome-btn:active { background: var(--surface-2); }
   .chrome-btn.on { color: var(--accent); }
-  .chrome-zoom { font-family: inherit; font-size: 13px; font-weight: 700; padding: 7px 8px; }
 
   .page-indicator {
     position: sticky; bottom: 16px; align-self: center;
@@ -468,8 +467,6 @@
   <div class="reader-chrome" id="readerChrome">
     <button class="chrome-btn" id="chromeBack" aria-label="Назад в библиотеку"></button>
     <div class="chrome-title" id="chromeTitle"></div>
-    <button class="chrome-btn chrome-zoom" id="chromeZoomMinus" type="button" aria-label="Уменьшить страницу">A−</button>
-    <button class="chrome-btn chrome-zoom" id="chromeZoomPlus" type="button" aria-label="Увеличить страницу">A+</button>
     <button class="chrome-btn" id="chromeBookmark" aria-label="Добавить закладку"></button>
     <button class="chrome-btn" id="chromeMenu" aria-label="Меню книги"></button>
   </div>
@@ -1826,12 +1823,7 @@ document.getElementById('pdfContainer').addEventListener('click', e => {
       if (note) { openNoteQuickBar(note, map); return; }
       closeNoteQuickBar();
       const word = wordAtPoint(e.clientX, e.clientY, map);
-      if (word) {
-        const range = rangeFromOffsets(map, word.start, word.end);
-        if (range) renderSelectionPreview(map, range);
-        openPanel(word.word, true);
-        return;
-      }
+      if (word) { openPanel(word.word, true); return; }
     }
   }
   closeNoteQuickBar();
@@ -2521,8 +2513,6 @@ document.getElementById('searchInput').addEventListener('input', e => {
 });
 document.getElementById('zoomPlus').addEventListener('click', () => setZoom(zoom + 10));
 document.getElementById('zoomMinus').addEventListener('click', () => setZoom(zoom - 10));
-document.getElementById('chromeZoomPlus').addEventListener('click', () => setZoom(zoom + 10));
-document.getElementById('chromeZoomMinus').addEventListener('click', () => setZoom(zoom - 10));
 document.getElementById('brightnessSlider').addEventListener('input', e => {
   brightness = parseInt(e.target.value, 10);
   localStorage.setItem(STORAGE_BRIGHTNESS, String(brightness));
