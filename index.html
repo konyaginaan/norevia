@@ -403,14 +403,21 @@
     opacity: 0; pointer-events: none; transition: opacity 0.25s; z-index: 40;
   }
   .backdrop.show { opacity: 1; pointer-events: auto; }
+  /* --kb — сколько снизу занимает экранная клавиатура (см. syncKeyboardInset).
+     Шторка приколота к низу окна, а окно при открытии клавиатуры на iOS не
+     уменьшается — поэтому без этого сдвига кнопки «Удалить» и «Сохранить»
+     оказываются прямо под клавиатурой, и до них не дотянуться. */
   .sheet {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+    bottom: var(--kb, 0px);
     max-width: 640px; margin: 0 auto;
     background: var(--surface);
     border-radius: 22px 22px 0 0;
     box-shadow: 0 -4px 26px var(--shadow);
     padding: 1.15rem 1.15rem calc(env(safe-area-inset-bottom, 0px) + 1.15rem);
-    max-height: 78vh; overflow-y: auto;
+    overflow-y: auto;
+    max-height: 78vh;
+    max-height: min(78vh, calc(100vh - var(--kb, 0px) - 40px));
     transform: translateY(110%);
     transition: transform 0.25s cubic-bezier(0.4,0,0.2,1);
   }
@@ -2353,6 +2360,38 @@ function watchReaderLayout() {
   readerLayoutWatcher.observe(document.getElementById('pdfContainer'));
 }
 
+// ── экранная клавиатура ──
+// Шторка с заметкой прибита к низу окна, но на iOS окно при открытии
+// клавиатуры не уменьшается — уменьшается только видимая его часть. Поэтому
+// кнопки «Удалить» и «Сохранить» уезжали под клавиатуру. Меряем, сколько
+// снизу занято, и поднимаем шторку ровно на столько же. На Android, где
+// окно само сжимается, разница выходит нулевой — и там ничего не двигается.
+function syncKeyboardInset() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const hidden = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
+  document.documentElement.style.setProperty('--kb', hidden + 'px');
+}
+
+function watchKeyboard() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  vv.addEventListener('resize', syncKeyboardInset);
+  vv.addEventListener('scroll', syncKeyboardInset);
+  syncKeyboardInset();
+  // Клавиатура выезжает с задержкой и не всегда шлёт resize вовремя —
+  // после фокуса перемеряем и подтягиваем кнопки в видимую часть шторки.
+  document.addEventListener('focusin', e => {
+    const sheet = e.target.closest && e.target.closest('.sheet');
+    if (!sheet) return;
+    setTimeout(() => {
+      syncKeyboardInset();
+      sheet.scrollTop = sheet.scrollHeight;
+    }, 350);
+  });
+  document.addEventListener('focusout', () => setTimeout(syncKeyboardInset, 350));
+}
+
 // Счётчик страниц и состояние закладки: программная прокрутка не везде
 // порождает событие scroll, поэтому после восстановления позиции их надо
 // пересчитать самим.
@@ -3793,6 +3832,7 @@ document.getElementById('chromeToc').innerHTML = icon('toc');
 document.getElementById('tpClose').innerHTML = icon('close', 'icon-sm');
 applyAppearance();
 watchReaderLayout();
+watchKeyboard();
 renderSelColors();
 renderTabbar();
 showTab('view-library');
