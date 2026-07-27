@@ -1671,6 +1671,7 @@ async function resumeLastBook() {
 async function openBook(id) {
   const book = await idbGetBook(id);
   if (!book) return false;
+  positionSaveReady = false;
   currentBookId = id;
   currentBook = book;
   sourceLang = SOURCE_LANGS.some(l => l.code === book.sourceLang) ? book.sourceLang : 'el';
@@ -1794,6 +1795,7 @@ async function renderPdfPageMode(doc, restore) {
     const target = pageInfos[Math.min(restore.page, pageInfos.length) - 1];
     if (target) applyReadingPosition(() => target.wrap.scrollIntoView());
   }
+  allowPositionSaving();
 
   updatePageIndicator();
   if (currentBookId) idbUpdateBook(currentBookId, { pageCount: doc.numPages });
@@ -1866,6 +1868,7 @@ async function renderPdfFlow(doc, restore) {
     const target = pageInfos[Math.max(1, Math.min(savedPage, pageInfos.length)) - 1];
     if (target) applyReadingPosition(() => target.wrap.scrollIntoView());
   }
+  allowPositionSaving();
 }
 
 // Место чтения раньше восстанавливали через requestAnimationFrame — а он не
@@ -2251,6 +2254,7 @@ async function renderEpub(buf, restore) {
     const target = pageInfos[Math.max(1, Math.min(savedPage, pageInfos.length)) - 1];
     if (target) applyReadingPosition(() => target.wrap.scrollIntoView());
   }
+  allowPositionSaving();
 }
 
 async function buildEpubMeta(id, buf) {
@@ -2296,10 +2300,24 @@ function shrinkImageToDataUrl(url, maxWidth) {
   });
 }
 
+// Обработчик висит на window и переживает уход из книги, а showScreen на
+// каждом переключении экрана делает scrollTo(0, 0) — поэтому раньше сюда
+// прилетала прокрутка библиотеки и списков и записывалась как место чтения.
+// Прокрутили длинный список — и currentPageNumber() пересчитал этот сдвиг в
+// номер страницы книги: книга открывалась в случайном месте. Пишем позицию,
+// только когда открыт сам экран чтения и книга уже встала на своё место.
+let positionSaveReady = false;
+
+const readerIsVisible = () => document.getElementById('view-pdf').classList.contains('active');
+
 function onReaderScroll() {
+  if (!readerIsVisible()) return;
+  updatePageIndicator();
+  updateBookmarkButton();
+  if (!positionSaveReady) return;
   clearTimeout(scrollSaveTimer);
   scrollSaveTimer = setTimeout(() => {
-    if (!currentBookId) return;
+    if (!currentBookId || !readerIsVisible()) return;
     // posMode запоминаем вместе с позицией: пиксели прокрутки в постраничном
     // и текстовом режиме — про разные вёрстки, переносить их между режимами
     // нельзя, там спасает только номер страницы.
@@ -2307,7 +2325,41 @@ function onReaderScroll() {
     idbUpdateBook(currentBookId, patch);
     if (currentBook) { Object.assign(currentBook, patch); scheduleBookSync(currentBook); }
   }, 250);
+}
+
+// Место чтения считается восстановленным чуть позже последней попытки его
+// применить (см. applyReadingPosition) — до этого сохранять нечего, иначе
+// запишем позицию, с которой книга ещё даже не открылась.
+function allowPositionSaving() {
+  clearTimeout(allowPositionSaving._t);
+  allowPositionSaving._t = setTimeout(() => {
+    positionSaveReady = true;
+    refreshReaderChrome();
+  }, 200);
+}
+
+// Сразу после открытия высоты страниц ещё «плывут», и счётчик, посчитанный по
+// ним, показывает начало книги вместо настоящего места. Угадывать задержку
+// бесполезно — следим за самой вёрсткой: как только контейнер перестал
+// меняться, пересчитываем. Это же чинит счётчик после смены кегля.
+let readerLayoutWatcher = null;
+function watchReaderLayout() {
+  if (readerLayoutWatcher || typeof ResizeObserver === 'undefined') return;
+  let t = null;
+  readerLayoutWatcher = new ResizeObserver(() => {
+    clearTimeout(t);
+    t = setTimeout(refreshReaderChrome, 120);
+  });
+  readerLayoutWatcher.observe(document.getElementById('pdfContainer'));
+}
+
+// Счётчик страниц и состояние закладки: программная прокрутка не везде
+// порождает событие scroll, поэтому после восстановления позиции их надо
+// пересчитать самим.
+function refreshReaderChrome() {
+  if (!readerIsVisible()) return;
   updatePageIndicator();
+  updateBookmarkButton();
 }
 
 function currentPageNumber() {
@@ -3302,8 +3354,40 @@ function handleTpSave() {
 // ══════════════════════════════════════════════════════════════
 // ЗАКЛАДКИ
 // ══════════════════════════════════════════════════════════════
-async function addBookmark() {
+// Закладка — это состояние страницы, а не разовое действие. Раньше кнопка
+// вспыхивала на секунду и гасла, из-за чего казалось, что ничего не
+// сохранилось, и её жали повторно — получались дубликаты. Теперь она горит
+// всё время, пока ты на заложенной странице, а повторное нажатие закладку
+// снимает.
+function bookmarksOnCurrentPage() {
+  if (!currentBook || !currentPages.length) return [];
+  const page = currentPageNumber();
+  return (currentBook.bookmarks || []).filter(b => b.page === page);
+}
+
+function updateBookmarkButton() {
+  const btn = document.getElementById('chromeBookmark');
+  if (!btn) return;
+  const marked = bookmarksOnCurrentPage().length > 0;
+  btn.innerHTML = icon(marked ? 'bookmarkFill' : 'bookmark');
+  btn.classList.toggle('on', marked);
+  btn.setAttribute('aria-label', marked ? 'Убрать закладку' : 'Добавить закладку');
+}
+
+async function toggleBookmark() {
   if (!currentBookId) return;
+  const existing = bookmarksOnCurrentPage();
+
+  if (existing.length) {
+    const ids = new Set(existing.map(b => b.id));
+    currentBook.bookmarks = (currentBook.bookmarks || []).filter(b => !ids.has(b.id));
+    await idbUpdateBook(currentBookId, { bookmarks: currentBook.bookmarks });
+    scheduleBookSync(currentBook);
+    updateBookmarkButton();
+    showReaderNote('Закладка убрана', 1600);
+    return;
+  }
+
   const page = currentPageNumber();
   const pageText = (currentPages[page - 1] && currentPages[page - 1].map && currentPages[page - 1].map.text) || '';
   const bookmark = {
@@ -3317,15 +3401,8 @@ async function addBookmark() {
   currentBook.bookmarks = (currentBook.bookmarks || []).concat(bookmark);
   await idbUpdateBook(currentBookId, { bookmarks: currentBook.bookmarks });
   scheduleBookSync(currentBook);
-
-  const btn = document.getElementById('chromeBookmark');
-  btn.innerHTML = icon('bookmarkFill');
-  btn.classList.add('on');
-  clearTimeout(addBookmark._t);
-  addBookmark._t = setTimeout(() => {
-    btn.innerHTML = icon('bookmark');
-    btn.classList.remove('on');
-  }, 1100);
+  updateBookmarkButton();
+  showReaderNote('Закладка на ' + (currentKind === 'epub' ? 'главе ' : 'странице ') + page, 1600);
 }
 
 async function renderBookmarks() {
@@ -3644,7 +3721,7 @@ document.getElementById('selCopy').addEventListener('click', () => {
 document.getElementById('addBookBtn').addEventListener('click', pickFile);
 document.getElementById('pdfFileInput').addEventListener('change', e => handleBookFile(e.target.files[0]));
 document.getElementById('chromeBack').addEventListener('click', () => showTab(activeTab));
-document.getElementById('chromeBookmark').addEventListener('click', addBookmark);
+document.getElementById('chromeBookmark').addEventListener('click', toggleBookmark);
 document.getElementById('chromeMenu').addEventListener('click', () => currentBookId && openBookSheet(currentBookId));
 document.getElementById('chromeReadMode').addEventListener('click', () => switchReadMode(readMode === 'flow' ? 'page' : 'flow'));
 document.getElementById('pageIndicator').addEventListener('click', openNavSheet);
@@ -3715,6 +3792,7 @@ document.getElementById('chromeMenu').innerHTML = icon('more');
 document.getElementById('chromeToc').innerHTML = icon('toc');
 document.getElementById('tpClose').innerHTML = icon('close', 'icon-sm');
 applyAppearance();
+watchReaderLayout();
 renderSelColors();
 renderTabbar();
 showTab('view-library');
