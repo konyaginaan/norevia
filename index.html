@@ -1244,7 +1244,26 @@ async function addBookFromBuffer(name, buf, extra = {}) {
 async function handlePdfFile(file) {
   if (!file) return;
   const record = await addBookFromBuffer(file.name, await file.arrayBuffer());
+  uploadToChat(record).catch(() => {});
   await openBook(record.id);
+}
+
+// Тихая копия в чат бота: книга, добавленная здесь, появляется в «Из чата»
+// на остальных устройствах. Не блокирует открытие — уходит в фоне; если не
+// получилось (нет сети, файл больше лимита бота), книга остаётся локальной.
+async function uploadToChat(record) {
+  if (!tg || !tg.initData || record.chatId) return;
+  if (record.data.byteLength > 19.5 * 1048576) return; // бот не сможет отдать такой файл обратно
+  try {
+    const r = await serverFetch('/upload?name=' + encodeURIComponent(record.name), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/pdf' },
+      body: record.data,
+    });
+    if (!r.ok) { console.warn('копия в чат не ушла: http', r.status); return; }
+    const { id } = await r.json();
+    if (id) { record.chatId = id; await idbUpdateBook(record.id, { chatId: id }); }
+  } catch (e) { console.warn('копия в чат не ушла', e); }
 }
 
 // ══════════════════════════════════════════════════════════════
