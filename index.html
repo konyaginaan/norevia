@@ -219,6 +219,9 @@
   /* Фильтр инверсии — только на самой картинке страницы, иначе в тёмной
      теме он выворачивает и цвет маркера/выделения, делая их грязными. */
   .pdf-page canvas { display: block; width: 100%; height: 100%; position: relative; z-index: 0; filter: var(--page-filter); }
+  /* Страница-картинка (обложка, иллюстрация): инверсия тёмной темы сделала бы
+     из неё негатив, поэтому только приглушаем яркость. */
+  .pdf-page canvas.raw { filter: brightness(var(--page-brightness, 1)); }
   .pdf-page-loading {
     position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
     color: var(--muted); font-size: 13px;
@@ -233,10 +236,16 @@
     line-height: 1; text-align: initial; forced-color-adjust: none;
     transform-origin: 0 0; z-index: 2;
   }
+  /* Нативное выделение отключено намеренно: в вебвью Telegram долгий тап по
+     тексту его не создаёт, поэтому выделение мы ведём сами (см. «ВЫДЕЛЕНИЕ
+     ДОЛГИМ ТАПОМ»). Раз так — нативное надо выключить совсем, иначе iOS будет
+     параллельно показывать свою лупу и меню «Скопировать» поверх нашего. */
+  .textLayer {
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+  }
   .textLayer span, .textLayer br {
     color: transparent; position: absolute; white-space: pre;
     cursor: pointer; transform-origin: 0% 0%;
-    -webkit-user-select: text; user-select: text; -webkit-touch-callout: default;
   }
   /* Нативная ::selection режется по обрывкам span'ов pdf.js и выглядит рвано —
      прячем её и рисуем свою подсветку по строкам поверх highlight-layer (см. renderSelectionPreview). */
@@ -261,6 +270,29 @@
     color: inherit; position: static; white-space: normal; cursor: text;
   }
   .flow-text ::selection { background: transparent; }
+  .flow-stub {
+    padding: 18px 0; text-align: center; color: var(--muted);
+    font-size: 12px; opacity: 0.6;
+  }
+  /* Ненавязчивое сообщение поверх чтения (например, «книга без текстового
+     слоя») — само уезжает, ничего не загораживает надолго. */
+  .reader-note {
+    position: fixed; left: 50%; transform: translateX(-50%) translateY(12px);
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 62px); z-index: 46;
+    max-width: min(88vw, 420px);
+    background: var(--surface); border: 1px solid var(--border);
+    box-shadow: 0 6px 20px var(--shadow); border-radius: 14px;
+    padding: 11px 15px; font-size: 13px; line-height: 1.4; color: var(--text);
+    opacity: 0; pointer-events: none; transition: opacity 0.25s ease, transform 0.25s ease;
+  }
+  .reader-note.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* переход по книге */
+  .nav-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+  .nav-page { font-size: 26px; font-weight: 800; }
+  .nav-of { font-size: 13px; color: var(--muted); }
+  .nav-actions { display: flex; gap: 9px; margin: 14px 0 12px; }
+  .nav-actions .btn-outline { flex: 1; }
 
   .reader-chrome {
     position: sticky; top: 0; z-index: 30;
@@ -293,10 +325,11 @@
     background: color-mix(in srgb, var(--text) 78%, transparent); color: var(--bg);
     font-size: 12px; font-weight: 700;
     padding: 6px 13px; border-radius: 20px;
-    z-index: 30; pointer-events: none;
+    z-index: 30; border: none; cursor: pointer; font-family: inherit;
     transition: opacity 0.2s ease;
   }
-  .page-indicator.hidden { opacity: 0; }
+  .page-indicator:active { opacity: 0.75; }
+  .page-indicator.hidden { opacity: 0; pointer-events: none; }
 
   /* ══════════════ ПАНЕЛЬ НАД ВЫДЕЛЕНИЕМ ══════════════ */
   .sel-toolbar {
@@ -505,7 +538,8 @@
     <button class="chrome-btn" id="jumpClose" type="button" aria-label="Скрыть"></button>
   </div>
   <div id="pdfContainer"></div>
-  <div class="page-indicator" id="pageIndicator"></div>
+  <button class="page-indicator" id="pageIndicator" type="button" aria-label="Перейти к странице"></button>
+  <div class="reader-note" id="readerNote"></div>
 </div>
 
 <!-- ═════════ ЗАКЛАДКИ ═════════ -->
@@ -547,7 +581,7 @@
       <div class="size-value" id="zoomValue">100%</div>
       <button class="size-btn" id="zoomPlus">A+</button>
     </div>
-    <div class="set-hint">Страницы PDF — это изображения, поэтому шрифт в книге поменять нельзя: масштаб увеличивает саму страницу.</div>
+    <div class="set-hint">Относится только к режиму страниц PDF: там страница — картинка, и масштаб увеличивает её целиком. В текстовом режиме размер шрифта меняется кнопками A− / A+ прямо при чтении.</div>
   </div>
 
   <div class="set-group">
@@ -593,6 +627,20 @@
 <div class="sheet" id="bookSheet">
   <div class="sheet-grip"></div>
   <div id="bookSheetBody"></div>
+</div>
+
+<div class="sheet" id="navSheet">
+  <div class="sheet-grip"></div>
+  <div class="nav-head">
+    <div class="nav-page" id="navPage"></div>
+    <div class="nav-of" id="navOf"></div>
+  </div>
+  <input class="slider" id="navSlider" type="range" min="1" max="1" step="1">
+  <div class="nav-actions">
+    <button class="btn-outline" id="navStart" type="button">В начало</button>
+    <button class="btn-outline" id="navEnd" type="button">В конец</button>
+  </div>
+  <button class="btn-wide done" id="navGo">Перейти</button>
 </div>
 
 <div class="sheet" id="noteSheet">
@@ -941,9 +989,10 @@ let theme = localStorage.getItem(STORAGE_THEME) || 'light';
 let accent = localStorage.getItem(STORAGE_ACCENT) || ACCENTS[0];
 let zoom = parseInt(localStorage.getItem(STORAGE_ZOOM) || '100', 10);
 let brightness = parseInt(localStorage.getItem(STORAGE_BRIGHTNESS) || '100', 10);
-// 'page' — исходные страницы PDF картинкой (как есть в файле);
-// 'flow' — извлечённый текст, свёрстанный заново, подстраивается под экран.
-let readMode = localStorage.getItem(STORAGE_READ_MODE) === 'flow' ? 'flow' : 'page';
+// 'flow' — извлечённый текст, свёрстанный заново, подстраивается под экран
+// (основной режим чтения); 'page' — исходные страницы PDF картинкой, запасной
+// вариант для книг со сложной вёрсткой и сканов, где текста в файле нет.
+let readMode = localStorage.getItem(STORAGE_READ_MODE) === 'page' ? 'page' : 'flow';
 let flowFont = parseInt(localStorage.getItem(STORAGE_FLOW_FONT) || '100', 10);
 
 function applyAppearance() {
@@ -952,6 +1001,7 @@ function applyAppearance() {
   document.documentElement.style.setProperty('--accent-soft', accent + '22');
   const base = theme === 'sepia' ? 'sepia(0.22) ' : theme === 'dark' ? 'invert(0.9) hue-rotate(180deg) ' : '';
   document.documentElement.style.setProperty('--page-filter', base + `brightness(${brightness / 100})`);
+  document.documentElement.style.setProperty('--page-brightness', String(brightness / 100));
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1045,6 +1095,17 @@ function wrapText(text, maxChars, maxLines) {
 }
 
 const esc = s => String(s || '').replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+
+// Ключ для поиска: без ударений и без разницы между обычной и конечной сигмой.
+// По-гречески иначе не найти — в названии файла стоит «αύριο», а с клавиатуры
+// набирают «αυριο», и точное сравнение строк их не сводит. NFD разбивает букву
+// на основу и знак ударения, а знаки (диапазон 0300–036F) мы выкидываем.
+const searchKey = s => String(s || '')
+  .toLowerCase()
+  .normalize('NFD')
+  .replace(/[̀-ͯ]/g, '')
+  .replace(/ς/g, 'σ')
+  .trim();
 
 function placeholderCover(book) {
   const t = COVER_TEMPLATES[hashCode(book.id || book.name || '') % COVER_TEMPLATES.length];
@@ -1153,10 +1214,10 @@ async function renderLibrary() {
   });
 
   const filter = FILTERS.find(f => f.code === activeFilter);
-  const q = searchQuery.trim().toLowerCase();
+  const q = searchKey(searchQuery);
   const shown = books
     .filter(filter.match)
-    .filter(b => !q || (b.title || b.name).toLowerCase().includes(q) || (b.author || '').toLowerCase().includes(q))
+    .filter(b => !q || searchKey(b.title || b.name).includes(q) || searchKey(b.author).includes(q))
     .sort((a, b) => (b.lastOpenedAt || b.addedAt) - (a.lastOpenedAt || a.addedAt));
 
   body.innerHTML = `<div class="book-list" id="bookList"></div>
@@ -1530,6 +1591,21 @@ async function buildBookMeta(id, buf) {
   if (activeTab === 'view-library') renderLibrary();
 }
 
+// Приложение открывалось всегда на библиотеке, даже если книгу читали минуту
+// назад — возвращаемся сразу в неё, как делает любая читалка. Кнопка «назад»
+// в шапке по-прежнему уводит в библиотеку.
+async function resumeLastBook() {
+  try {
+    const books = await idbGetAllBooks();
+    const last = books
+      .filter(b => b.lastOpenedAt)
+      .sort((a, b) => b.lastOpenedAt - a.lastOpenedAt)[0];
+    if (last) await openBook(last.id);
+  } catch (e) {
+    console.warn('resumeLastBook failed', e);
+  }
+}
+
 async function openBook(id) {
   const book = await idbGetBook(id);
   if (!book) return false;
@@ -1548,7 +1624,11 @@ async function openBook(id) {
     new Promise(r => setTimeout(r, 1200)),
   ]);
   updateReadModeUiForBook();
-  await renderPdf(book.data, { scrollPos: book.scrollPos || 0, page: book.currentPage || 1 });
+  await renderPdf(book.data, {
+    scrollPos: book.scrollPos || 0,
+    page: book.currentPage || 1,
+    posMode: book.posMode || 'page',
+  });
   idbUpdateBook(id, { lastOpenedAt: Date.now() });
   if (pendingCloudPos && pendingCloudPos.bookId === id) {
     showJumpBar(pendingCloudPos.page);
@@ -1580,10 +1660,13 @@ document.getElementById('jumpClose').addEventListener('click', hideJumpBar);
 async function renderPdf(arrayBuffer, restore) {
   const opts = typeof restore === 'number' ? { scrollPos: restore } : (restore || {});
   const doc = await pdfjsLib.getDocument({ data: arrayBuffer.slice(0) }).promise;
+  // Точный пиксель прокрутки годится, только если он записан в том же режиме,
+  // в котором открываем: вёрстка страниц и текста между собой не совпадает.
+  const exact = opts.posMode === readMode ? (opts.scrollPos || 0) : 0;
   if (readMode === 'flow') {
-    await renderPdfFlow(doc, opts.page || 1);
+    await renderPdfFlow(doc, { page: opts.page || 1, scrollPos: exact });
   } else {
-    await renderPdfPageMode(doc, opts);
+    await renderPdfPageMode(doc, { page: opts.page || 1, scrollPos: exact });
   }
 }
 
@@ -1624,10 +1707,10 @@ async function renderPdfPageMode(doc, restore) {
   // иначе (пришли из текстового режима, там координаты не совпадают) —
   // встаём на начало нужной страницы по номеру.
   if (restore.scrollPos > 0) {
-    requestAnimationFrame(() => window.scrollTo(0, restore.scrollPos));
+    applyReadingPosition(() => window.scrollTo(0, restore.scrollPos));
   } else if (restore.page > 1) {
     const target = pageInfos[Math.min(restore.page, pageInfos.length) - 1];
-    if (target) requestAnimationFrame(() => target.wrap.scrollIntoView());
+    if (target) applyReadingPosition(() => target.wrap.scrollIntoView());
   }
 
   updatePageIndicator();
@@ -1643,7 +1726,8 @@ async function renderPdfPageMode(doc, restore) {
 // от постраничного режима не откладываем на IntersectionObserver, а строим
 // сразу всю книгу: чтобы прыгнуть на нужную страницу при входе в режим, всё
 // равно пришлось бы дорендерить всё по дороге, так что не усложняем.
-async function renderPdfFlow(doc, savedPage) {
+async function renderPdfFlow(doc, restore) {
+  const savedPage = (restore && restore.page) || 1;
   const container = document.getElementById('pdfContainer');
   container.innerHTML = '<div class="flow-loading">Готовим текст…</div>';
   container.style.setProperty('--flow-scale', flowFont / 100);
@@ -1651,15 +1735,31 @@ async function renderPdfFlow(doc, savedPage) {
   const flowWrap = document.createElement('div');
   flowWrap.className = 'flow-container';
   const pageInfos = [];
+  let pagesWithText = 0;
   for (let i = 1; i <= doc.numPages; i++) {
     const page = await doc.getPage(i);
     const wrap = document.createElement('div');
     wrap.className = 'flow-page';
     wrap.dataset.page = i;
-    await buildFlowPage(page, wrap, i);
+    if (await buildFlowPage(page, wrap, i)) pagesWithText++;
     flowWrap.appendChild(wrap);
     pageInfos.push({ wrap, num: i });
   }
+
+  // Скан вместо текста: в файле нет текстового слоя, извлекать нечего. Раньше
+  // такая книга открывалась пустой, а её страницы схлопывались в нулевую
+  // высоту — из-за этого счётчик считал текущей последнюю страницу и записывал
+  // её как место чтения, так что книга ещё и открывалась с конца. Молча
+  // возвращаемся к страницам PDF: там текст виден, просто картинкой.
+  if (!pagesWithText) {
+    readMode = 'page';
+    localStorage.setItem(STORAGE_READ_MODE, 'page');
+    updateReadModeUiForBook();
+    await renderPdfPageMode(doc, { page: savedPage });
+    showReaderNote('В этой книге нет текстового слоя — только картинки страниц, поэтому открыли её как PDF.');
+    return;
+  }
+
   container.innerHTML = '';
   container.appendChild(flowWrap);
   currentPages = pageInfos;
@@ -1669,8 +1769,23 @@ async function renderPdfFlow(doc, savedPage) {
   window.removeEventListener('scroll', onReaderScroll);
   window.addEventListener('scroll', onReaderScroll);
 
-  const target = pageInfos[Math.max(1, Math.min(savedPage, pageInfos.length)) - 1];
-  if (target) requestAnimationFrame(() => target.wrap.scrollIntoView());
+  if (restore && restore.scrollPos > 0) {
+    applyReadingPosition(() => window.scrollTo(0, restore.scrollPos));
+  } else {
+    const target = pageInfos[Math.max(1, Math.min(savedPage, pageInfos.length)) - 1];
+    if (target) applyReadingPosition(() => target.wrap.scrollIntoView());
+  }
+}
+
+// Место чтения раньше восстанавливали через requestAnimationFrame — а он не
+// выполняется, пока вкладка не показана. Вебвью Telegram в момент открытия
+// книги как раз ещё разъезжается, поэтому прокрутка молча не срабатывала и
+// книга открывалась с начала. Двигаемся сразу и повторяем следом: первый
+// вызов ловит обычный случай, второй — тот, где вёрстка досчиталась позже.
+function applyReadingPosition(apply) {
+  apply();
+  setTimeout(apply, 0);
+  setTimeout(apply, 60);
 }
 
 // pdf.js режет текст на «items» по кернингу и переносу строк внутри PDF, а не
@@ -1681,7 +1796,16 @@ async function renderPdfFlow(doc, savedPage) {
 async function buildFlowPage(page, wrap, pageNum) {
   const content = await page.getTextContent();
   const items = content.items.filter(it => it.str);
-  if (!items.length) return;
+  // Пустая страница (картинка, вклейка, разделитель) должна остаться видимым
+  // блоком: если дать ей схлопнуться в нулевую высоту, счётчик страниц
+  // перестаёт различать соседние страницы и уезжает в конец книги.
+  if (!items.length || !items.some(it => it.str.trim())) {
+    const stub = document.createElement('div');
+    stub.className = 'flow-stub';
+    stub.textContent = 'Стр. ' + pageNum + ' — без текста';
+    wrap.appendChild(stub);
+    return false;
+  }
 
   const lines = [];
   let cur = null;
@@ -1749,13 +1873,17 @@ async function buildFlowPage(page, wrap, pageNum) {
   // текстового режима для одной и той же страницы не совпадают побайтово.
   const map = { text, nodes, page: pageNum, hlLayer, wrap, layer: textEl, flow: true };
   pdfWordMaps.set(textEl, map);
+  return true;
 }
 
 function onReaderScroll() {
   clearTimeout(scrollSaveTimer);
   scrollSaveTimer = setTimeout(() => {
     if (!currentBookId) return;
-    const patch = { scrollPos: window.scrollY, currentPage: currentPageNumber(), posAt: Date.now() };
+    // posMode запоминаем вместе с позицией: пиксели прокрутки в постраничном
+    // и текстовом режиме — про разные вёрстки, переносить их между режимами
+    // нельзя, там спасает только номер страницы.
+    const patch = { scrollPos: window.scrollY, currentPage: currentPageNumber(), posMode: readMode, posAt: Date.now() };
     idbUpdateBook(currentBookId, patch);
     if (currentBook) { Object.assign(currentBook, patch); scheduleBookSync(currentBook); }
   }, 250);
@@ -1797,6 +1925,41 @@ function updatePageIndicator() {
   el.textContent = currentPages.length ? currentPageNumber() + ' / ' + currentPages.length : '';
 }
 
+let readerNoteTimer = null;
+function showReaderNote(text) {
+  const el = document.getElementById('readerNote');
+  el.textContent = text;
+  el.classList.add('show');
+  clearTimeout(readerNoteTimer);
+  readerNoteTimer = setTimeout(() => el.classList.remove('show'), 5200);
+}
+
+// ── переход по книге ──
+function goToPage(num) {
+  // Первая страница — это именно самый верх книги. Через scrollIntoView сюда
+  // не попасть: титульные страницы короткие, и счётчик (он смотрит на треть
+  // экрана) показал бы уже третью.
+  if (num <= 1) {
+    window.scrollTo(0, 0);
+    updatePageIndicator();
+    return;
+  }
+  const target = currentPages[Math.min(num, currentPages.length) - 1];
+  if (!target) return;
+  target.wrap.scrollIntoView();
+  updatePageIndicator();
+}
+
+function openNavSheet() {
+  if (!currentPages.length) return;
+  const slider = document.getElementById('navSlider');
+  slider.max = String(currentPages.length);
+  slider.value = String(currentPageNumber());
+  document.getElementById('navOf').textContent = 'из ' + currentPages.length;
+  document.getElementById('navPage').textContent = slider.value;
+  openSheet('navSheet');
+}
+
 async function renderPdfPage(info) {
   const { page, viewport, wrap } = info;
   wrap.innerHTML = '';
@@ -1810,6 +1973,16 @@ async function renderPdfPage(info) {
   canvas.width = Math.floor(viewport.width * outputScale);
   canvas.height = Math.floor(viewport.height * outputScale);
   wrap.appendChild(canvas);
+
+  // Инверсия для тёмной темы хороша для текстовых страниц (белое становится
+  // чёрным), но страницу-картинку — обложку, вклейку, иллюстрацию — она
+  // выворачивает в фотонегатив. Такие страницы (текста почти нет) оставляем
+  // в исходных цветах. Текст запрашиваем до отрисовки, чтобы класс стоял
+  // сразу и картинка не успела мигнуть негативом.
+  const textContent = await page.getTextContent();
+  const textLen = textContent.items.map(i => i.str).join('').trim().length;
+  if (textLen < 200) canvas.classList.add('raw');
+
   const transform = outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : undefined;
   await page.render({ canvasContext: canvas.getContext('2d'), viewport, transform }).promise;
 
@@ -1817,7 +1990,6 @@ async function renderPdfPage(info) {
   hlLayer.className = 'highlight-layer';
   wrap.appendChild(hlLayer);
 
-  const textContent = await page.getTextContent();
   const textLayerDiv = document.createElement('div');
   textLayerDiv.className = 'textLayer';
   wrap.appendChild(textLayerDiv);
@@ -1994,8 +2166,9 @@ function noteAtPoint(x, y, map) {
 // ТАП ПО СТРАНИЦЕ
 // ══════════════════════════════════════════════════════════════
 document.getElementById('pdfContainer').addEventListener('click', e => {
-  // Клик, которым снимают выделение, не должен открывать панель или прятать шапку.
-  if (window.getSelection().toString().trim()) return;
+  // Клик, которым закончили протяжку выделения, не должен вдобавок открыть
+  // перевод одного слова и погасить фразу.
+  if (selectionJustFinished) return;
   const tlayer = e.target.closest('.textLayer');
   if (tlayer) {
     const map = pdfWordMaps.get(tlayer);
@@ -2006,7 +2179,17 @@ document.getElementById('pdfContainer').addEventListener('click', e => {
       if (note) { openNoteQuickBar(note, map); return; }
       closeNoteQuickBar();
       const word = wordAtPoint(e.clientX, e.clientY, map);
-      if (word) { openPanel(word.word, true); return; }
+      if (word) {
+        // Показываем, какое именно слово переводим. Только в текстовом режиме:
+        // там текст живёт обычными узлами и прямоугольники ложатся точно, а в
+        // постраничном тот же приём однажды подсветил соседнее слово.
+        if (map.flow) {
+          const range = rangeFromOffsets(map, word.start, word.end);
+          if (range) renderSelectionPreview(map, range);
+        }
+        openPanel(word.word, true);
+        return;
+      }
     }
   }
   closeNoteQuickBar();
@@ -2053,7 +2236,7 @@ function wordAtPoint(x, y, map) {
 // ВЫДЕЛЕНИЕ ТЕКСТА
 // ══════════════════════════════════════════════════════════════
 let pendingSelection = null; // {text, map, start, end}
-let selSettleTimer = null;   // см. scheduleSelToolbar
+let selSettleTimer = null;   // страховочный таймер показа панели выделения
 
 function clearSelectionPreview() {
   document.querySelectorAll('.hl-rect-preview').forEach(el => el.remove());
@@ -2073,37 +2256,9 @@ function renderSelectionPreview(map, range) {
   });
 }
 
-// Только считаем и подсвечиваем выделение здесь — панель с цветами и
-// «Перевести» показываем отдельно, по окончании жеста (см. pointerup ниже),
-// иначе она дёргается и переставляется на каждый чих во время протяжки пальцем.
-function handleSelectionChange() {
-  const sel = window.getSelection();
-  const bar = document.getElementById('selToolbar');
-  const text = sel && !sel.isCollapsed && sel.rangeCount ? sel.toString().trim() : '';
-  if (text) closeNoteQuickBar();
-  const anchor = sel && sel.anchorNode;
-  const anchorEl = anchor ? (anchor.nodeType === 1 ? anchor : anchor.parentElement) : null;
-  const tlayer = anchorEl && anchorEl.closest ? anchorEl.closest('.textLayer') : null;
-
-  if (!text || !tlayer) {
-    clearTimeout(selSettleTimer);
-    bar.classList.remove('show');
-    pendingSelection = null;
-    clearSelectionPreview();
-    return;
-  }
-
-  const map = pdfWordMaps.get(tlayer);
-  const range = sel.getRangeAt(0);
-  const offsets = map ? offsetsFromRange(map, range) : null;
-  pendingSelection = { text, map, ...(offsets || {}) };
-  // В текстовом режиме доступен только перевод — маркер/заметка опираются на
-  // смещения постраничного режима (см. buildFlowPage).
-  document.getElementById('selToolbar').classList.toggle('notes-disabled', !!(map && map.flow));
-  if (map) renderSelectionPreview(map, range);
-  scheduleSelToolbar();
-}
-document.addEventListener('selectionchange', handleSelectionChange);
+// Слежения за нативным selectionchange здесь больше нет: в тексте книги
+// нативное выделение выключено (см. .textLayer в стилях), а своё мы ведём
+// в «ВЫДЕЛЕНИЕ ДОЛГИМ ТАПОМ» ниже.
 
 // Общая логика позиционирования плавающей панели (над выделением/маркером,
 // с переносом вниз, если сверху не хватает места) — используется и для
@@ -2119,34 +2274,125 @@ function positionFloatingBar(bar, rect) {
   bar.style.left = left + 'px';
 }
 
+// Позицию берём из собственных смещений выделения, а не из window.getSelection():
+// нативного выделения в тексте книги больше нет вовсе (см. ниже).
 function positionSelToolbar() {
-  const sel = window.getSelection();
-  if (!pendingSelection || !sel || sel.isCollapsed || !sel.rangeCount) return;
-  positionFloatingBar(document.getElementById('selToolbar'), sel.getRangeAt(0).getBoundingClientRect());
+  if (!pendingSelection || !pendingSelection.map || pendingSelection.start === undefined) return;
+  const range = rangeFromOffsets(pendingSelection.map, pendingSelection.start, pendingSelection.end);
+  if (!range) return;
+  positionFloatingBar(document.getElementById('selToolbar'), range.getBoundingClientRect());
 }
 
-// Панель показываем, когда выделение «затихло»: пока его тянут, selectionchange
-// сыплется непрерывно и таймер всё время сбрасывается — поэтому панель не скачет
-// за пальцем. Отпускание пальца показывает её сразу, но привязываться только к
-// pointerup нельзя: он теряется, если отпустить вне окна, и тогда панель не
-// появилась бы вовсе. Таймер — страховка, которая сама себя чинит.
-function scheduleSelToolbar() {
-  clearTimeout(selSettleTimer);
-  selSettleTimer = setTimeout(positionSelToolbar, 350);
-}
-// Считаем позицию сразу, без requestAnimationFrame: в скрытой или свёрнутой
-// вкладке rAF не выполняется вовсе, и панель тогда не появлялась бы никогда.
-// Таймер не сбрасываем — пусть перепроверит следом, вреда от этого нет.
-document.addEventListener('pointerup', () => {
-  positionSelToolbar();
-  scheduleSelToolbar();
-});
-
+// Панель показываем один раз, когда палец отпустили (см. finishPointer): пока
+// выделение тянут, она только мешала бы и прыгала за пальцем.
 // Нажатие на панель не должно сначала снять выделение (обычное поведение
 // браузера на pointerdown вне выделенного текста) — иначе к моменту click
 // текст выделения уже потерян.
 document.getElementById('selToolbar').addEventListener('pointerdown', e => e.preventDefault());
 document.getElementById('noteQuickBar').addEventListener('pointerdown', e => e.preventDefault());
+
+// ══════════════════════════════════════════════════════════════
+// ВЫДЕЛЕНИЕ ДОЛГИМ ТАПОМ (своё, вместо нативного)
+// ══════════════════════════════════════════════════════════════
+// В вебвью Telegram долгий тап по тексту не поднимает нативное выделение —
+// ни в постраничном режиме (прозрачные span'ы поверх картинки), ни в
+// текстовом (обычный поток). Проверять там нечего: жест просто не доходит.
+// Поэтому ведём выделение сами — по тем же символьным смещениям, что и
+// маркер: долгое нажатие цепляет слово, протяжка расширяет до слова под
+// пальцем. Границы всегда по словам — так удобнее для перевода и не нужны
+// пиксельно точные ручки, которые пальцем всё равно не поймать.
+const LONG_PRESS_MS = 350;
+const LONG_PRESS_SLOP = 10; // px: больше — это скролл, а не удержание
+let lpTimer = null, lpOrigin = null, lpMap = null, lpAnchor = null;
+let selecting = false;
+let selectionJustFinished = false;
+
+function clearOwnSelection() {
+  pendingSelection = null;
+  clearSelectionPreview();
+  clearTimeout(selSettleTimer);
+  document.getElementById('selToolbar').classList.remove('show');
+}
+
+function applyOwnSelection(map, start, end) {
+  pendingSelection = { text: map.text.slice(start, end), map, start, end };
+  const range = rangeFromOffsets(map, start, end);
+  if (range) renderSelectionPreview(map, range);
+  // В текстовом режиме доступен только перевод — маркер/заметка опираются на
+  // смещения постраничного режима (см. buildFlowPage).
+  document.getElementById('selToolbar').classList.toggle('notes-disabled', !!map.flow);
+}
+
+function cancelLongPress() {
+  clearTimeout(lpTimer);
+  lpTimer = null;
+  lpOrigin = null;
+}
+
+function beginSelection(x, y) {
+  if (!lpMap) return;
+  const word = wordAtPoint(x, y, lpMap);
+  if (!word) return;
+  selecting = true;
+  lpAnchor = word;
+  applyOwnSelection(lpMap, word.start, word.end);
+  // Отклик пальцу: без него непонятно, что удержание засчиталось. Методов,
+  // которых нет в клиенте, не просто «нет» — они бросают, отсюда try/catch.
+  try { tg && tg.HapticFeedback && tg.HapticFeedback.impactOccurred('light'); } catch {}
+}
+
+function extendSelection(x, y) {
+  if (!selecting || !lpMap || !lpAnchor) return;
+  const word = wordAtPoint(x, y, lpMap);
+  if (!word) return;
+  applyOwnSelection(
+    lpMap,
+    Math.min(lpAnchor.start, word.start),
+    Math.max(lpAnchor.end, word.end),
+  );
+}
+
+const pdfContainerEl = document.getElementById('pdfContainer');
+
+pdfContainerEl.addEventListener('pointerdown', e => {
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  // Новое касание по тексту снимает прошлое выделение. Панель выделения лежит
+  // вне контейнера, так что нажатие по её кнопкам сюда не приходит и выделение
+  // не теряется до того, как отработает click.
+  if (pendingSelection) clearOwnSelection();
+  const tlayer = e.target.closest && e.target.closest('.textLayer');
+  lpMap = tlayer ? pdfWordMaps.get(tlayer) : null;
+  if (!lpMap) return;
+  lpOrigin = { x: e.clientX, y: e.clientY };
+  clearTimeout(lpTimer);
+  lpTimer = setTimeout(() => beginSelection(lpOrigin.x, lpOrigin.y), LONG_PRESS_MS);
+});
+
+pdfContainerEl.addEventListener('pointermove', e => {
+  if (selecting) { extendSelection(e.clientX, e.clientY); return; }
+  // Палец поехал раньше, чем сработало удержание — значит листают, не выделяют.
+  if (lpOrigin && Math.hypot(e.clientX - lpOrigin.x, e.clientY - lpOrigin.y) > LONG_PRESS_SLOP) {
+    cancelLongPress();
+  }
+});
+
+function finishPointer() {
+  cancelLongPress();
+  if (!selecting) return;
+  selecting = false;
+  lpAnchor = null;
+  // click прилетит следом за pointerup — он не должен принять окончание
+  // выделения за тап по слову и открыть перевод одного слова поверх фразы.
+  selectionJustFinished = true;
+  setTimeout(() => { selectionJustFinished = false; }, 0);
+  if (pendingSelection) positionSelToolbar();
+}
+pdfContainerEl.addEventListener('pointerup', finishPointer);
+pdfContainerEl.addEventListener('pointercancel', () => { cancelLongPress(); selecting = false; lpAnchor = null; });
+
+// Пока тянут выделение, страница не должна ехать под пальцем. touch-action
+// на контейнере не подходит — он отнял бы обычный скролл целиком.
+document.addEventListener('touchmove', e => { if (selecting) e.preventDefault(); }, { passive: false });
 
 function renderSelColors() {
   const box = document.getElementById('selColors');
@@ -2174,7 +2420,10 @@ async function highlightSelection(color) {
   await idbUpdateBook(currentBookId, { notes: currentBook.notes });
   scheduleBookSync(currentBook);
   document.getElementById('selToolbar').classList.remove('show');
-  window.getSelection().removeAllRanges();
+  // Маркер лёг на текст — временную подсветку выделения убираем, иначе она
+  // осталась бы висеть поверх него вторым слоем.
+  pendingSelection = null;
+  clearSelectionPreview();
   drawHighlights(sel.map);
   openNoteSheet(note);
 }
@@ -2182,7 +2431,6 @@ async function highlightSelection(color) {
 function translateSelection() {
   const sel = pendingSelection;
   document.getElementById('selToolbar').classList.remove('show');
-  window.getSelection().removeAllRanges();
   if (sel && sel.text) {
     const info = sel.map && sel.start !== undefined ? { map: sel.map, start: sel.start, end: sel.end } : null;
     openPanel(sel.text, false, info);
@@ -2640,7 +2888,7 @@ function setZoom(next) {
   // .active, DOM читалки не пересоздаётся). Если книга открыта прямо сейчас
   // и активен постраничный режим (масштаб касается только его), перерисовываем
   // на месте, сохраняя место прокрутки.
-  if (currentBook && readMode === 'page') renderPdf(currentBook.data, { scrollPos: window.scrollY });
+  if (currentBook && readMode === 'page') renderPdf(currentBook.data, { scrollPos: window.scrollY, posMode: readMode });
 }
 
 function updateReadModeUiForBook() {
@@ -2727,6 +2975,16 @@ document.getElementById('chromeBack').addEventListener('click', () => showTab(ac
 document.getElementById('chromeBookmark').addEventListener('click', addBookmark);
 document.getElementById('chromeMenu').addEventListener('click', () => currentBookId && openBookSheet(currentBookId));
 document.getElementById('chromeReadMode').addEventListener('click', () => switchReadMode(readMode === 'flow' ? 'page' : 'flow'));
+document.getElementById('pageIndicator').addEventListener('click', openNavSheet);
+document.getElementById('navSlider').addEventListener('input', e => {
+  document.getElementById('navPage').textContent = e.target.value;
+});
+document.getElementById('navGo').addEventListener('click', () => {
+  goToPage(parseInt(document.getElementById('navSlider').value, 10));
+  closeAllSheets();
+});
+document.getElementById('navStart').addEventListener('click', () => { goToPage(1); closeAllSheets(); });
+document.getElementById('navEnd').addEventListener('click', () => { goToPage(currentPages.length); closeAllSheets(); });
 document.getElementById('chromeFontPlus').addEventListener('click', () => setFlowFont(flowFont + 10));
 document.getElementById('chromeFontMinus').addEventListener('click', () => setFlowFont(flowFont - 10));
 document.getElementById('searchInput').addEventListener('input', e => {
@@ -2771,6 +3029,7 @@ applyAppearance();
 renderSelColors();
 renderTabbar();
 showTab('view-library');
+resumeLastBook();
 initHomeScreenButton();
 mergeWordsFromCloud().catch(() => {});
 </script>
