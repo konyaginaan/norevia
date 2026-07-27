@@ -242,6 +242,26 @@
      прячем её и рисуем свою подсветку по строкам поверх highlight-layer (см. renderSelectionPreview). */
   .textLayer ::selection { background: transparent; }
 
+  /* ══════════════ ТЕКСТОВЫЙ РЕЖИМ (перетекающий текст) ══════════════
+     Тот же класс .textLayer навешен и здесь — чтобы весь код тапа/выделения/
+     перевода (wordAtPoint, handleSelectionChange, closest('.textLayer'))
+     работал без изменений. Но сами правила .textLayer выше рассчитаны на
+     невидимый слой поверх картинки страницы — здесь их отменяем: текст должен
+     быть видимым и жить в обычном потоке документа, а не быть картой глифов. */
+  .flow-container { max-width: 640px; margin: 0 auto; padding: 4px 1.25rem 48px; }
+  .flow-page { position: relative; }
+  .flow-loading { padding: 40px 0; text-align: center; color: var(--muted); font-size: 13px; }
+  .flow-text {
+    position: static; inset: auto; overflow: visible;
+    line-height: 1.6; text-align: justify; forced-color-adjust: auto;
+    font-size: calc(17px * var(--flow-scale, 1)); color: var(--text);
+  }
+  .flow-text p { margin: 0 0 1em; }
+  .flow-text span, .flow-text br {
+    color: inherit; position: static; white-space: normal; cursor: text;
+  }
+  .flow-text ::selection { background: transparent; }
+
   .reader-chrome {
     position: sticky; top: 0; z-index: 30;
     display: flex; align-items: center; gap: 4px;
@@ -265,6 +285,8 @@
   .chrome-btn { background: none; border: none; cursor: pointer; color: var(--text); padding: 7px; border-radius: 10px; display: flex; }
   .chrome-btn:active { background: var(--surface-2); }
   .chrome-btn.on { color: var(--accent); }
+  .chrome-zoom { font-family: inherit; font-size: 13px; font-weight: 700; padding: 7px 8px; }
+  .chrome-zoom.hidden { display: none; }
 
   .page-indicator {
     position: sticky; bottom: 16px; align-self: center;
@@ -284,6 +306,9 @@
     box-shadow: 0 6px 20px var(--shadow);
   }
   .sel-toolbar.show { display: flex; }
+  /* В текстовом режиме у выделения нет постраничных смещений PDF-слоя,
+     на которые опирается маркер/заметка — оставляем только перевод. */
+  .sel-toolbar.notes-disabled .sel-colors, .sel-toolbar.notes-disabled .sel-div { display: none; }
   .sel-colors { display: flex; gap: 4px; }
   .sel-color {
     width: 26px; height: 26px; border-radius: 50%; border: 2px solid transparent;
@@ -467,6 +492,9 @@
   <div class="reader-chrome" id="readerChrome">
     <button class="chrome-btn" id="chromeBack" aria-label="Назад в библиотеку"></button>
     <div class="chrome-title" id="chromeTitle"></div>
+    <button class="chrome-btn chrome-zoom" id="chromeFontMinus" type="button" aria-label="Меньше шрифта">A−</button>
+    <button class="chrome-btn chrome-zoom" id="chromeFontPlus" type="button" aria-label="Больше шрифта">A+</button>
+    <button class="chrome-btn" id="chromeReadMode" type="button" aria-label="Текстовый режим"></button>
     <button class="chrome-btn" id="chromeBookmark" aria-label="Добавить закладку"></button>
     <button class="chrome-btn" id="chromeMenu" aria-label="Меню книги"></button>
   </div>
@@ -646,6 +674,8 @@ const STORAGE_THEME = 'reader_theme_v1';
 const STORAGE_ACCENT = 'reader_accent_v1';
 const STORAGE_ZOOM = 'reader_zoom_v1';
 const STORAGE_BRIGHTNESS = 'reader_brightness_v1';
+const STORAGE_READ_MODE = 'reader_read_mode_v1';
+const STORAGE_FLOW_FONT = 'reader_flow_font_v1';
 
 const IDB_NAME = 'greek_reader_db';
 const IDB_VERSION = 3;
@@ -911,6 +941,10 @@ let theme = localStorage.getItem(STORAGE_THEME) || 'light';
 let accent = localStorage.getItem(STORAGE_ACCENT) || ACCENTS[0];
 let zoom = parseInt(localStorage.getItem(STORAGE_ZOOM) || '100', 10);
 let brightness = parseInt(localStorage.getItem(STORAGE_BRIGHTNESS) || '100', 10);
+// 'page' — исходные страницы PDF картинкой (как есть в файле);
+// 'flow' — извлечённый текст, свёрстанный заново, подстраивается под экран.
+let readMode = localStorage.getItem(STORAGE_READ_MODE) === 'flow' ? 'flow' : 'page';
+let flowFont = parseInt(localStorage.getItem(STORAGE_FLOW_FONT) || '100', 10);
 
 function applyAppearance() {
   document.documentElement.setAttribute('data-theme', theme);
@@ -1513,7 +1547,8 @@ async function openBook(id) {
     mergeBookFromCloud(book).catch(() => {}),
     new Promise(r => setTimeout(r, 1200)),
   ]);
-  await renderPdf(book.data, book.scrollPos || 0);
+  updateReadModeUiForBook();
+  await renderPdf(book.data, { scrollPos: book.scrollPos || 0, page: book.currentPage || 1 });
   idbUpdateBook(id, { lastOpenedAt: Date.now() });
   if (pendingCloudPos && pendingCloudPos.bookId === id) {
     showJumpBar(pendingCloudPos.page);
@@ -1542,10 +1577,19 @@ document.getElementById('jumpGo').addEventListener('click', () => {
 });
 document.getElementById('jumpClose').addEventListener('click', hideJumpBar);
 
-async function renderPdf(arrayBuffer, savedScroll) {
+async function renderPdf(arrayBuffer, restore) {
+  const opts = typeof restore === 'number' ? { scrollPos: restore } : (restore || {});
+  const doc = await pdfjsLib.getDocument({ data: arrayBuffer.slice(0) }).promise;
+  if (readMode === 'flow') {
+    await renderPdfFlow(doc, opts.page || 1);
+  } else {
+    await renderPdfPageMode(doc, opts);
+  }
+}
+
+async function renderPdfPageMode(doc, restore) {
   const container = document.getElementById('pdfContainer');
   container.innerHTML = '';
-  const doc = await pdfjsLib.getDocument({ data: arrayBuffer.slice(0) }).promise;
 
   const targetWidth = (Math.min(document.body.clientWidth, 640) - 32) * (zoom / 100);
   const pageInfos = [];
@@ -1576,12 +1620,135 @@ async function renderPdf(arrayBuffer, savedScroll) {
   }, { rootMargin: '1000px 0px' });
   pageInfos.forEach(p => observer.observe(p.wrap));
 
-  if (savedScroll > 0) requestAnimationFrame(() => window.scrollTo(0, savedScroll));
+  // Есть точный пиксель прокрутки (обычное открытие книги) — используем его;
+  // иначе (пришли из текстового режима, там координаты не совпадают) —
+  // встаём на начало нужной страницы по номеру.
+  if (restore.scrollPos > 0) {
+    requestAnimationFrame(() => window.scrollTo(0, restore.scrollPos));
+  } else if (restore.page > 1) {
+    const target = pageInfos[Math.min(restore.page, pageInfos.length) - 1];
+    if (target) requestAnimationFrame(() => target.wrap.scrollIntoView());
+  }
 
   updatePageIndicator();
   if (currentBookId) idbUpdateBook(currentBookId, { pageCount: doc.numPages });
   window.removeEventListener('scroll', onReaderScroll);
   window.addEventListener('scroll', onReaderScroll);
+}
+
+// ══════════════════════════════════════════════════════════════
+// ТЕКСТОВЫЙ РЕЖИМ (перетекающий текст вместо картинки страницы)
+// ══════════════════════════════════════════════════════════════
+// Извлекаем текст — это дёшево (никакого рендера в канвас), поэтому в отличие
+// от постраничного режима не откладываем на IntersectionObserver, а строим
+// сразу всю книгу: чтобы прыгнуть на нужную страницу при входе в режим, всё
+// равно пришлось бы дорендерить всё по дороге, так что не усложняем.
+async function renderPdfFlow(doc, savedPage) {
+  const container = document.getElementById('pdfContainer');
+  container.innerHTML = '<div class="flow-loading">Готовим текст…</div>';
+  container.style.setProperty('--flow-scale', flowFont / 100);
+
+  const flowWrap = document.createElement('div');
+  flowWrap.className = 'flow-container';
+  const pageInfos = [];
+  for (let i = 1; i <= doc.numPages; i++) {
+    const page = await doc.getPage(i);
+    const wrap = document.createElement('div');
+    wrap.className = 'flow-page';
+    wrap.dataset.page = i;
+    await buildFlowPage(page, wrap, i);
+    flowWrap.appendChild(wrap);
+    pageInfos.push({ wrap, num: i });
+  }
+  container.innerHTML = '';
+  container.appendChild(flowWrap);
+  currentPages = pageInfos;
+
+  updatePageIndicator();
+  if (currentBookId) idbUpdateBook(currentBookId, { pageCount: doc.numPages });
+  window.removeEventListener('scroll', onReaderScroll);
+  window.addEventListener('scroll', onReaderScroll);
+
+  const target = pageInfos[Math.max(1, Math.min(savedPage, pageInfos.length)) - 1];
+  if (target) requestAnimationFrame(() => target.wrap.scrollIntoView());
+}
+
+// pdf.js режет текст на «items» по кернингу и переносу строк внутри PDF, а не
+// по абзацам — своя развёрстка нужна, чтобы текст умел переноситься по ширине
+// экрана, а не оставался приколоченным к исходным координатам страницы.
+// Эвристика конца абзаца: строка, не дотянувшая до общего правого края —
+// в PDF так выглядит последняя строка абзаца, а не перенос по ширине.
+async function buildFlowPage(page, wrap, pageNum) {
+  const content = await page.getTextContent();
+  const items = content.items.filter(it => it.str);
+  if (!items.length) return;
+
+  const lines = [];
+  let cur = null;
+  for (const it of items) {
+    const y = it.transform[5];
+    if (!cur || Math.abs(cur.y - y) > 2) {
+      cur = { y, items: [], right: -Infinity, left: Infinity };
+      lines.push(cur);
+    }
+    cur.items.push(it);
+    const left = it.transform[4];
+    const right = left + (it.width || 0);
+    if (right > cur.right) cur.right = right;
+    if (left < cur.left) cur.left = left;
+  }
+  const maxRight = Math.max(...lines.map(l => l.right));
+  const minLeft = Math.min(...lines.map(l => l.left));
+  const lineWidth = Math.max(maxRight - minLeft, 1);
+
+  // Тот же класс .textLayer навешен и здесь ради общего кода тапа/выделения/
+  // перевода (wordAtPoint, handleSelectionChange, closest('.textLayer')) —
+  // но правила .textLayer, рассчитанные на невидимый слой поверх картинки,
+  // здесь отменены классом .flow-text (см. CSS).
+  const textEl = document.createElement('div');
+  textEl.className = 'textLayer flow-text';
+  let para = document.createElement('p');
+  textEl.appendChild(para);
+
+  lines.forEach((line, i) => {
+    line.items.forEach(it => {
+      const span = document.createElement('span');
+      span.textContent = it.str;
+      para.appendChild(span);
+    });
+    const next = lines[i + 1];
+    const shortfall = maxRight - line.right;
+    if (next && shortfall > lineWidth * 0.12) {
+      para = document.createElement('p');
+      textEl.appendChild(para);
+    } else if (next) {
+      const lastNode = para.lastChild;
+      if (lastNode && !/\s$/.test(lastNode.textContent || '')) {
+        para.appendChild(document.createTextNode(' '));
+      }
+    }
+  });
+
+  wrap.style.position = 'relative';
+  const hlLayer = document.createElement('div');
+  hlLayer.className = 'highlight-layer';
+  wrap.appendChild(hlLayer);
+  wrap.appendChild(textEl);
+
+  const walker = document.createTreeWalker(textEl, NodeFilter.SHOW_TEXT);
+  let text = '';
+  const nodes = [];
+  let n;
+  while ((n = walker.nextNode())) {
+    nodes.push({ node: n, start: text.length, end: text.length + n.textContent.length });
+    text += n.textContent;
+  }
+  // map.flow помечает карту текстового режима — по нему отключаем маркер/
+  // заметки (см. клик по странице и handleSelectionChange): их смещения
+  // считаются от текста конкретного режима, а тексты постраничного и
+  // текстового режима для одной и той же страницы не совпадают побайтово.
+  const map = { text, nodes, page: pageNum, hlLayer, wrap, layer: textEl, flow: true };
+  pdfWordMaps.set(textEl, map);
 }
 
 function onReaderScroll() {
@@ -1598,6 +1765,20 @@ function onReaderScroll() {
 function currentPageNumber() {
   if (!currentPages.length) return 1;
   const probe = window.scrollY + innerHeight * 0.35;
+  // В текстовом режиме страницы уже все в DOM с настоящей высотой (текст
+  // рендерится не лениво, см. renderPdfFlow) — меряем по факту, без
+  // накопленной оценки, которая нужна только там, где страницы ещё не
+  // отрисованы (постраничный режим, канвас лениво по IntersectionObserver).
+  // Смотрим на форму самих записей currentPages, а не на глобальный readMode:
+  // между сменой режима и перерисовкой есть await, и на стыке они рассинхронятся.
+  if (!currentPages[0].viewport) {
+    let current = 1;
+    for (const p of currentPages) {
+      const top = p.wrap.getBoundingClientRect().top + window.scrollY;
+      if (top <= probe) current = p.num; else break;
+    }
+    return current;
+  }
   // Отступ до первой страницы меряем по факту: сверху ещё и sticky-шапка,
   // высота которой зависит от safe-area устройства.
   let cum = currentPages[0].wrap.getBoundingClientRect().top + window.scrollY;
@@ -1819,7 +2000,9 @@ document.getElementById('pdfContainer').addEventListener('click', e => {
   if (tlayer) {
     const map = pdfWordMaps.get(tlayer);
     if (map) {
-      const note = noteAtPoint(e.clientX, e.clientY, map);
+      // В текстовом режиме смещения свои (см. buildFlowPage) — заметки,
+      // сохранённые в постраничном режиме, по ним не ищем.
+      const note = map.flow ? null : noteAtPoint(e.clientX, e.clientY, map);
       if (note) { openNoteQuickBar(note, map); return; }
       closeNoteQuickBar();
       const word = wordAtPoint(e.clientX, e.clientY, map);
@@ -1914,6 +2097,9 @@ function handleSelectionChange() {
   const range = sel.getRangeAt(0);
   const offsets = map ? offsetsFromRange(map, range) : null;
   pendingSelection = { text, map, ...(offsets || {}) };
+  // В текстовом режиме доступен только перевод — маркер/заметка опираются на
+  // смещения постраничного режима (см. buildFlowPage).
+  document.getElementById('selToolbar').classList.toggle('notes-disabled', !!(map && map.flow));
   if (map) renderSelectionPreview(map, range);
   scheduleSelToolbar();
 }
@@ -1978,7 +2164,7 @@ function renderSelColors() {
 
 async function highlightSelection(color) {
   const sel = pendingSelection;
-  if (!sel || !sel.map || sel.start === undefined) return;
+  if (!sel || !sel.map || sel.map.flow || sel.start === undefined) return;
   const note = {
     id: newId(), page: sel.map.page,
     startOffset: sel.start, endOffset: sel.end,
@@ -2183,11 +2369,16 @@ async function saveCurrentNote() {
   if (!currentText || !currentBookId) return;
   if ((currentBook.notes || []).some(n => n.text === currentText)) return;
   const info = panelSelectionInfo;
+  // Смещения текстового режима не совпадают со смещениями постраничного
+  // (см. buildFlowPage) — сохраняем текст заметки в любом режиме, но рамку-
+  // подсветку на странице привязываем к смещениям, только если они из
+  // постраничного режима, иначе она однажды нарисуется не в том месте.
+  const hasPageOffsets = info && info.map && !info.map.flow;
   const note = {
     id: newId(),
     page: (info && info.map && info.map.page) || currentPageNumber(),
-    startOffset: info ? info.start : undefined,
-    endOffset: info ? info.end : undefined,
+    startOffset: hasPageOffsets ? info.start : undefined,
+    endOffset: hasPageOffsets ? info.end : undefined,
     text: currentText,
     color: 'yellow',
     comment: document.getElementById('tpTranslation').textContent,
@@ -2196,7 +2387,7 @@ async function saveCurrentNote() {
   currentBook.notes = (currentBook.notes || []).concat(note);
   await idbUpdateBook(currentBookId, { notes: currentBook.notes });
   scheduleBookSync(currentBook);
-  if (info && info.map) drawHighlights(info.map);
+  if (hasPageOffsets) drawHighlights(info.map);
   updateSaveButton();
 }
 
@@ -2446,9 +2637,37 @@ function setZoom(next) {
   document.getElementById('zoomValue').textContent = zoom + '%';
   // Раньше новый масштаб подхватывался только при следующем открытии книги —
   // экран настроек и экран чтения независимы (showScreen лишь переключает
-  // .active, DOM читалки не пересоздаётся). Если книга открыта прямо сейчас,
-  // перерисовываем её на месте, сохраняя место прокрутки.
-  if (currentBook) renderPdf(currentBook.data, window.scrollY);
+  // .active, DOM читалки не пересоздаётся). Если книга открыта прямо сейчас
+  // и активен постраничный режим (масштаб касается только его), перерисовываем
+  // на месте, сохраняя место прокрутки.
+  if (currentBook && readMode === 'page') renderPdf(currentBook.data, { scrollPos: window.scrollY });
+}
+
+function updateReadModeUiForBook() {
+  const isFlow = readMode === 'flow';
+  const btn = document.getElementById('chromeReadMode');
+  btn.classList.toggle('on', isFlow);
+  btn.innerHTML = icon('reading');
+  btn.setAttribute('aria-label', isFlow ? 'Вернуться к страницам PDF' : 'Текстовый режим');
+  document.getElementById('chromeFontMinus').classList.toggle('hidden', !isFlow);
+  document.getElementById('chromeFontPlus').classList.toggle('hidden', !isFlow);
+}
+
+function switchReadMode(mode) {
+  if (mode === readMode) return;
+  const page = currentBook ? currentPageNumber() : 1;
+  readMode = mode;
+  localStorage.setItem(STORAGE_READ_MODE, mode);
+  updateReadModeUiForBook();
+  if (currentBook) renderPdf(currentBook.data, { page });
+}
+
+// Кегль текстового режима — просто CSS-переменная, без перестройки текста,
+// поэтому в отличие от масштаба страниц применяется мгновенно и без сдвигов.
+function setFlowFont(next) {
+  flowFont = Math.max(70, Math.min(200, next));
+  localStorage.setItem(STORAGE_FLOW_FONT, String(flowFont));
+  document.getElementById('pdfContainer').style.setProperty('--flow-scale', flowFont / 100);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -2507,6 +2726,9 @@ document.getElementById('pdfFileInput').addEventListener('change', e => handlePd
 document.getElementById('chromeBack').addEventListener('click', () => showTab(activeTab));
 document.getElementById('chromeBookmark').addEventListener('click', addBookmark);
 document.getElementById('chromeMenu').addEventListener('click', () => currentBookId && openBookSheet(currentBookId));
+document.getElementById('chromeReadMode').addEventListener('click', () => switchReadMode(readMode === 'flow' ? 'page' : 'flow'));
+document.getElementById('chromeFontPlus').addEventListener('click', () => setFlowFont(flowFont + 10));
+document.getElementById('chromeFontMinus').addEventListener('click', () => setFlowFont(flowFont - 10));
 document.getElementById('searchInput').addEventListener('input', e => {
   searchQuery = e.target.value;
   renderLibrary();
