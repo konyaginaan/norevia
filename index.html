@@ -236,12 +236,14 @@
     line-height: 1; text-align: initial; forced-color-adjust: none;
     transform-origin: 0 0; z-index: 2;
   }
-  /* Нативное выделение отключено намеренно: в вебвью Telegram долгий тап по
-     тексту его не создаёт, поэтому выделение мы ведём сами (см. «ВЫДЕЛЕНИЕ
-     ДОЛГИМ ТАПОМ»). Раз так — нативное надо выключить совсем, иначе iOS будет
-     параллельно показывать свою лупу и меню «Скопировать» поверх нашего. */
+  /* user-select здесь обязан остаться text. Выделение мы ведём сами (см.
+     «ВЫДЕЛЕНИЕ ДОЛГИМ ТАПОМ»), и был соблазн выключить нативное совсем — но
+     от него зависит caretPositionFromPoint, а на нём держится ВСЁ: и тап по
+     слову ради перевода, и наш собственный жест. С user-select: none страница
+     просто перестаёт отзываться на касания. Меню «Скопировать» глушим отдельно,
+     через touch-callout — оно на каретку не влияет. */
   .textLayer {
-    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+    -webkit-user-select: text; user-select: text; -webkit-touch-callout: none;
   }
   .textLayer span, .textLayer br {
     color: transparent; position: absolute; white-space: pre;
@@ -315,6 +317,21 @@
   .nav-of { font-size: 13px; color: var(--muted); }
   .nav-actions { display: flex; gap: 9px; margin: 14px 0 12px; }
   .nav-actions .btn-outline { flex: 1; }
+  #navSearch { margin: 12px 0 10px; }
+  .nav-list { max-height: 34vh; overflow-y: auto; margin-bottom: 12px; }
+  .nav-list:empty { display: none; }
+  .nav-item {
+    display: block; width: 100%; text-align: left; cursor: pointer;
+    background: none; border: none; font-family: inherit; color: inherit;
+    padding: 9px 2px; border-bottom: 1px solid var(--border);
+  }
+  .nav-item:active { background: var(--surface-2); }
+  .nav-item-title { font-size: 14px; line-height: 1.35; }
+  .nav-item-sub { font-size: 12px; color: var(--muted); margin-top: 3px; }
+  .nav-item-sub b { color: var(--text); font-weight: 700; }
+  .nav-depth-1 { padding-left: 14px; }
+  .nav-depth-2 { padding-left: 28px; }
+  .nav-empty { padding: 10px 2px; font-size: 13px; color: var(--muted); }
 
   .reader-chrome {
     position: sticky; top: 0; z-index: 30;
@@ -361,9 +378,6 @@
     box-shadow: 0 6px 20px var(--shadow);
   }
   .sel-toolbar.show { display: flex; }
-  /* В текстовом режиме у выделения нет постраничных смещений PDF-слоя,
-     на которые опирается маркер/заметка — оставляем только перевод. */
-  .sel-toolbar.notes-disabled .sel-colors, .sel-toolbar.notes-disabled .sel-div { display: none; }
   .sel-colors { display: flex; gap: 4px; }
   .sel-color {
     width: 26px; height: 26px; border-radius: 50%; border: 2px solid transparent;
@@ -657,6 +671,8 @@
     <div class="nav-page" id="navPage"></div>
     <div class="nav-of" id="navOf"></div>
   </div>
+  <input class="search-input" id="navSearch" type="search" placeholder="Найти в книге" autocomplete="off">
+  <div class="nav-list" id="navList"></div>
   <input class="slider" id="navSlider" type="range" min="1" max="1" step="1">
   <div class="nav-actions">
     <button class="btn-outline" id="navStart" type="button">В начало</button>
@@ -744,7 +760,10 @@ const STORAGE_THEME = 'reader_theme_v1';
 const STORAGE_ACCENT = 'reader_accent_v1';
 const STORAGE_ZOOM = 'reader_zoom_v1';
 const STORAGE_BRIGHTNESS = 'reader_brightness_v1';
-const STORAGE_READ_MODE = 'reader_read_mode_v1';
+// v2: у ключа v1 могло остаться значение 'page', записанное старым, слишком
+// широким откатом на страницы PDF (см. renderPdfFlow) — новый ключ сбрасывает
+// эту застрявшую настройку и возвращает всех к текстовому режиму.
+const STORAGE_READ_MODE = 'reader_read_mode_v2';
 const STORAGE_FLOW_FONT = 'reader_flow_font_v1';
 
 const IDB_NAME = 'greek_reader_db';
@@ -1379,6 +1398,7 @@ let chromeVisible = true;
 let currentBookId = null;
 let currentBook = null;
 let currentKind = 'pdf'; // 'pdf' | 'epub' — чем открыта текущая книга
+let currentPdfDoc = null; // нужен поиску: в постраничном режиме текст берём из него
 
 async function addBookFromBuffer(name, buf, extra = {}) {
   const record = {
@@ -1655,6 +1675,8 @@ async function openBook(id) {
   // текстовое; для PDF возвращаем сохранённый выбор.
   currentKind = book.kind === 'epub' ? 'epub' : 'pdf';
   if (currentKind === 'epub') readMode = 'flow';
+  // Книга-скан открывается страницами всегда — текста в ней просто нет.
+  else if (book.noTextLayer) readMode = 'page';
   else readMode = localStorage.getItem(STORAGE_READ_MODE) === 'page' ? 'page' : 'flow';
   updateReadModeUiForBook();
 
@@ -1702,6 +1724,9 @@ document.getElementById('jumpClose').addEventListener('click', hideJumpBar);
 async function renderPdf(arrayBuffer, restore) {
   const opts = typeof restore === 'number' ? { scrollPos: restore } : (restore || {});
   const doc = await pdfjsLib.getDocument({ data: arrayBuffer.slice(0) }).promise;
+  currentPdfDoc = doc;
+  bookTextIndex = null;
+  buildPdfToc(doc).then(toc => { currentToc = toc; });
   // Точный пиксель прокрутки годится, только если он записан в том же режиме,
   // в котором открываем: вёрстка страниц и текста между собой не совпадает.
   const exact = opts.posMode === readMode ? (opts.scrollPos || 0) : 0;
@@ -1784,9 +1809,10 @@ async function renderPdfFlow(doc, restore) {
     const wrap = document.createElement('div');
     wrap.className = 'flow-page';
     wrap.dataset.page = i;
-    if (await buildFlowPage(page, wrap, i)) pagesWithText++;
+    const map = await buildFlowPage(page, wrap, i);
+    if (map) pagesWithText++;
     flowWrap.appendChild(wrap);
-    pageInfos.push({ wrap, num: i });
+    pageInfos.push({ wrap, num: i, map });
   }
 
   // Скан вместо текста: в файле нет текстового слоя, извлекать нечего. Раньше
@@ -1794,9 +1820,13 @@ async function renderPdfFlow(doc, restore) {
   // высоту — из-за этого счётчик считал текущей последнюю страницу и записывал
   // её как место чтения, так что книга ещё и открывалась с конца. Молча
   // возвращаемся к страницам PDF: там текст виден, просто картинкой.
+  // Откат запоминаем ЗА КНИГОЙ, а не в общей настройке: раньше здесь стоял
+  // localStorage.setItem — и один скан переводил на страницы PDF вообще все
+  // книги в библиотеке, включая те, где текст прекрасно извлекается.
   if (!pagesWithText) {
     readMode = 'page';
-    localStorage.setItem(STORAGE_READ_MODE, 'page');
+    if (currentBookId) idbUpdateBook(currentBookId, { noTextLayer: true });
+    if (currentBook) currentBook.noTextLayer = true;
     updateReadModeUiForBook();
     await renderPdfPageMode(doc, { page: savedPage });
     showReaderNote('В этой книге нет текстового слоя — только картинки страниц, поэтому открыли её как PDF.');
@@ -1806,6 +1836,9 @@ async function renderPdfFlow(doc, restore) {
   container.innerHTML = '';
   container.appendChild(flowWrap);
   currentPages = pageInfos;
+  // Маркеры рисуем после вставки в документ: до неё у текста нет геометрии,
+  // и прямоугольники подсветки посчитались бы нулевыми.
+  redrawAllHighlights();
 
   updatePageIndicator();
   if (currentBookId) idbUpdateBook(currentBookId, { pageCount: doc.numPages });
@@ -1916,7 +1949,7 @@ async function buildFlowPage(page, wrap, pageNum) {
   // текстового режима для одной и той же страницы не совпадают побайтово.
   const map = { text, nodes, page: pageNum, hlLayer, wrap, layer: textEl, flow: true };
   pdfWordMaps.set(textEl, map);
-  return true;
+  return map;
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1989,7 +2022,83 @@ async function readEpub(buf) {
     if (meta) coverItem = manifest.get(meta.getAttribute('content'));
   }
 
-  return { zip, opfDir, spine, manifest, coverItem, title: pick('title'), author: pick('creator') };
+  const toc = await readEpubToc(zip, opfDir, opf, manifest, spine);
+  return { zip, opfDir, spine, manifest, coverItem, toc, title: pick('title'), author: pick('creator') };
+}
+
+// Оглавление в EPUB лежит в двух разных местах в зависимости от версии:
+// в 3.0 это отдельный XHTML-документ с <nav>, в 2.0 — файл NCX. Читаем оба:
+// книги в библиотеке попадаются и те, и другие.
+async function readEpubToc(zip, opfDir, opf, manifest, spine) {
+  const spineIndex = new Map();
+  spine.forEach((item, i) => spineIndex.set(zipResolve(opfDir, item.href), i + 1));
+  const pageOf = href => spineIndex.get(zipResolve(opfDir, href)) || null;
+
+  const readFile = async path => {
+    const f = zip.file(path);
+    return f ? f.async('string') : null;
+  };
+  const parser = new DOMParser();
+
+  try {
+    const navItem = Array.from(manifest.values()).find(i => /\bnav\b/.test(i.props));
+    if (navItem) {
+      const html = await readFile(zipResolve(opfDir, navItem.href));
+      if (html) {
+        const doc = parser.parseFromString(html, 'text/html');
+        const navs = Array.from(doc.querySelectorAll('nav'));
+        const nav = navs.find(n => (n.getAttribute('epub:type') || n.getAttribute('type') || '') === 'toc') || navs[0];
+        if (nav) {
+          const out = [];
+          nav.querySelectorAll('a[href]').forEach(a => {
+            const title = a.textContent.trim();
+            const page = pageOf(a.getAttribute('href'));
+            // Вложенность берём по числу списков над ссылкой — так подпункты
+            // остаются подпунктами, а не сваливаются в один плоский столбец.
+            let depth = 0;
+            for (let el = a.parentElement; el && el !== nav; el = el.parentElement) {
+              if (el.tagName === 'OL' || el.tagName === 'UL') depth++;
+            }
+            if (title && page) out.push({ title, page, depth: Math.max(0, depth - 1) });
+          });
+          if (out.length) return out;
+        }
+      }
+    }
+  } catch (e) { console.warn('nav-оглавление не прочиталось', e); }
+
+  try {
+    let ncx = Array.from(manifest.values()).find(i => /dtbncx/.test(i.type));
+    if (!ncx) {
+      const tocId = (opf.querySelector('spine') || {}).getAttribute
+        ? opf.querySelector('spine').getAttribute('toc') : null;
+      if (tocId) ncx = manifest.get(tocId);
+    }
+    if (ncx) {
+      const xml = await readFile(zipResolve(opfDir, ncx.href));
+      if (xml) {
+        const doc = parser.parseFromString(xml, 'application/xml');
+        const out = [];
+        const walk = (node, depth) => {
+          Array.from(node.children)
+            .filter(c => c.localName === 'navPoint')
+            .forEach(pt => {
+              const label = pt.querySelector('navLabel > text');
+              const content = pt.querySelector('content');
+              const page = content ? pageOf(content.getAttribute('src') || '') : null;
+              const title = label ? label.textContent.trim() : '';
+              if (title && page) out.push({ title, page, depth });
+              walk(pt, depth + 1);
+            });
+        };
+        const navMap = Array.from(doc.documentElement.children).find(c => c.localName === 'navMap');
+        if (navMap) walk(navMap, 0);
+        if (out.length) return out;
+      }
+    }
+  } catch (e) { console.warn('NCX-оглавление не прочиталось', e); }
+
+  return [];
 }
 
 const EPUB_DROP = new Set(['SCRIPT', 'STYLE', 'LINK', 'META', 'TITLE', 'IFRAME', 'OBJECT',
@@ -2077,8 +2186,9 @@ async function buildEpubChapter(epub, item, wrap, num, objectUrls) {
     nodes.push({ node: n, start: text.length, end: text.length + n.textContent.length });
     text += n.textContent;
   }
-  pdfWordMaps.set(textEl, { text, nodes, page: num, hlLayer, wrap, layer: textEl, flow: true });
-  return text.trim().length > 0;
+  const map = { text, nodes, page: num, hlLayer, wrap, layer: textEl, flow: true };
+  pdfWordMaps.set(textEl, map);
+  return text.trim().length ? map : null;
 }
 
 let epubObjectUrls = [];
@@ -2091,6 +2201,9 @@ async function renderEpub(buf, restore) {
   epubObjectUrls = [];
 
   const epub = await readEpub(buf);
+  currentToc = epub.toc || [];
+  bookTextIndex = null;
+  currentPdfDoc = null;
   const flowWrap = document.createElement('div');
   flowWrap.className = 'flow-container';
   flowWrap.lang = sourceLang; // без языка браузеру нечем расставлять переносы
@@ -2099,14 +2212,17 @@ async function renderEpub(buf, restore) {
     const wrap = document.createElement('div');
     wrap.className = 'flow-page';
     wrap.dataset.page = i + 1;
-    await buildEpubChapter(epub, epub.spine[i], wrap, i + 1, epubObjectUrls);
+    const map = await buildEpubChapter(epub, epub.spine[i], wrap, i + 1, epubObjectUrls);
     flowWrap.appendChild(wrap);
-    pageInfos.push({ wrap, num: i + 1 });
+    pageInfos.push({ wrap, num: i + 1, map });
   }
 
   container.innerHTML = '';
   container.appendChild(flowWrap);
   currentPages = pageInfos;
+  // Маркеры рисуем после вставки в документ: до неё у текста нет геометрии,
+  // и прямоугольники подсветки посчитались бы нулевыми.
+  redrawAllHighlights();
 
   updatePageIndicator();
   if (currentBookId) idbUpdateBook(currentBookId, { pageCount: pageInfos.length });
@@ -2246,7 +2362,161 @@ function openNavSheet() {
   slider.value = String(currentPageNumber());
   document.getElementById('navOf').textContent = 'из ' + currentPages.length;
   document.getElementById('navPage').textContent = slider.value;
+  document.getElementById('navSearch').value = '';
+  renderTocList();
   openSheet('navSheet');
+}
+
+// ── оглавление ──
+let currentToc = [];
+
+// В PDF оглавление — это закладки документа. Пункт указывает не на номер
+// страницы, а на объект внутри файла, поэтому каждый адрес приходится
+// разрешать отдельно; книги без закладок — обычное дело, тогда список пуст.
+async function buildPdfToc(doc) {
+  try {
+    const outline = await doc.getOutline();
+    if (!outline || !outline.length) return [];
+    const out = [];
+    const walk = async (items, depth) => {
+      for (const item of items) {
+        let page = null;
+        try {
+          const dest = typeof item.dest === 'string' ? await doc.getDestination(item.dest) : item.dest;
+          if (Array.isArray(dest) && dest[0]) page = (await doc.getPageIndex(dest[0])) + 1;
+        } catch {}
+        if (item.title && item.title.trim() && page) out.push({ title: item.title.trim(), page, depth });
+        if (item.items && item.items.length) await walk(item.items, depth + 1);
+      }
+    };
+    await walk(outline, 0);
+    return out;
+  } catch (e) {
+    console.warn('оглавление PDF не прочиталось', e);
+    return [];
+  }
+}
+
+function renderTocList() {
+  const list = document.getElementById('navList');
+  list.innerHTML = '';
+  if (!currentToc.length) {
+    list.innerHTML = '<div class="nav-empty">В этой книге нет оглавления — есть ползунок и поиск.</div>';
+    return;
+  }
+  currentToc.forEach(item => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'nav-item' + (item.depth ? ' nav-depth-' + Math.min(item.depth, 2) : '');
+    const t = document.createElement('div');
+    t.className = 'nav-item-title';
+    t.textContent = item.title;
+    b.append(t);
+    b.addEventListener('click', () => { goToPage(item.page); closeAllSheets(); });
+    list.append(b);
+  });
+}
+
+// ── поиск по тексту книги ──
+// Складываем ударения и регистр, НЕ меняя длину строки: иначе найденное
+// смещение не совпало бы с исходным текстом. Поэтому не normalize('NFD') на
+// всю строку, а посимвольно — каждый символ заменяется ровно одним.
+const foldText = s => Array.from(String(s || '')).map(ch => {
+  const base = ch.normalize('NFD')[0].toLowerCase();
+  return base === 'ς' ? 'σ' : base;
+}).join('');
+
+let bookTextIndex = null; // [{page, text}] — строится один раз на книгу
+
+async function getBookTextIndex() {
+  if (bookTextIndex) return bookTextIndex;
+  // В текстовом режиме и в EPUB весь текст уже разобран и лежит в картах.
+  if (currentPages.length && currentPages.every(p => p.map)) {
+    bookTextIndex = currentPages.map(p => ({ page: p.num, text: p.map.text }));
+    return bookTextIndex;
+  }
+  // В постраничном режиме страницы рисуются лениво, карт ещё нет — достаём
+  // текст прямо из документа.
+  if (!currentPdfDoc) return [];
+  const index = [];
+  for (let i = 1; i <= currentPdfDoc.numPages; i++) {
+    const page = await currentPdfDoc.getPage(i);
+    const content = await page.getTextContent();
+    index.push({ page: i, text: content.items.map(it => it.str).join('') });
+  }
+  bookTextIndex = index;
+  return bookTextIndex;
+}
+
+const SEARCH_LIMIT = 60;
+async function runBookSearch(query) {
+  const list = document.getElementById('navList');
+  const q = foldText(query.trim());
+  if (q.length < 2) { renderTocList(); return; }
+
+  list.innerHTML = '<div class="nav-empty">Ищу…</div>';
+  const index = await getBookTextIndex();
+  // Пока искали, запрос мог смениться — тогда этот результат уже не нужен.
+  if (foldText(document.getElementById('navSearch').value.trim()) !== q) return;
+
+  const hits = [];
+  for (const entry of index) {
+    const hay = foldText(entry.text);
+    let from = 0;
+    while (hits.length < SEARCH_LIMIT) {
+      const at = hay.indexOf(q, from);
+      if (at === -1) break;
+      hits.push({ page: entry.page, start: at, end: at + q.length, text: entry.text });
+      from = at + q.length;
+    }
+    if (hits.length >= SEARCH_LIMIT) break;
+  }
+
+  list.innerHTML = '';
+  if (!hits.length) {
+    list.innerHTML = '<div class="nav-empty">Ничего не нашлось.</div>';
+    return;
+  }
+  hits.forEach(hit => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'nav-item';
+    const sub = document.createElement('div');
+    sub.className = 'nav-item-sub';
+    const before = hit.text.slice(Math.max(0, hit.start - 40), hit.start).replace(/\s+/g, ' ');
+    const match = hit.text.slice(hit.start, hit.end);
+    const after = hit.text.slice(hit.end, hit.end + 60).replace(/\s+/g, ' ');
+    sub.append(
+      document.createTextNode((hit.start > 40 ? '…' : '') + before),
+      Object.assign(document.createElement('b'), { textContent: match }),
+      document.createTextNode(after + '…'),
+    );
+    const t = document.createElement('div');
+    t.className = 'nav-item-title';
+    t.textContent = (currentKind === 'epub' ? 'Глава ' : 'Стр. ') + hit.page;
+    b.append(t, sub);
+    b.addEventListener('click', () => { goToMatch(hit); closeAllSheets(); });
+    list.append(b);
+  });
+}
+
+// Переход к найденному: мало открыть страницу — надо показать само место,
+// поэтому подсвечиваем найденное тем же слоем, что и выделение.
+function goToMatch(hit) {
+  const info = currentPages[hit.page - 1];
+  if (!info) return;
+  const map = info.map;
+  if (!map) { goToPage(hit.page); return; }
+  const range = rangeFromOffsets(map, hit.start, hit.end);
+  if (!range) { goToPage(hit.page); return; }
+  clearSelectionPreview();
+  applyReadingPosition(() => {
+    const rects = range.getClientRects();
+    const top = rects.length ? rects[0].top : 0;
+    window.scrollTo(0, window.scrollY + top - innerHeight * 0.3);
+    renderSelectionPreview(map, range);
+  });
+  updatePageIndicator();
 }
 
 async function renderPdfPage(info) {
@@ -2406,13 +2676,30 @@ function mergeLineRects(rects) {
   return lines;
 }
 
+// Смещения заметки считаются от текста того режима, в котором её поставили,
+// а тексты постраничного и текстового режима для одной страницы не совпадают
+// побайтово. Поэтому в «своём» режиме берём сохранённые смещения, а в чужом
+// ищем заметку по её тексту — так маркер переживает переключение режима, а не
+// съезжает на случайное место (или пропадает, как было раньше).
+function noteOffsets(map, nt) {
+  const sameMode = (nt.mode || 'page') === (map.flow ? 'flow' : 'page');
+  if (sameMode && nt.startOffset !== undefined) return [nt.startOffset, nt.endOffset];
+  if (nt.text) {
+    const i = map.text.indexOf(nt.text);
+    if (i >= 0) return [i, i + nt.text.length];
+  }
+  return null;
+}
+
 function drawHighlights(map) {
   if (!map || !map.hlLayer) return;
   map.hlLayer.innerHTML = '';
   const notes = (currentBook && currentBook.notes || []).filter(nt => nt.page === map.page);
   const base = map.wrap.getBoundingClientRect();
   notes.forEach(nt => {
-    const range = rangeFromOffsets(map, nt.startOffset, nt.endOffset);
+    const offsets = noteOffsets(map, nt);
+    if (!offsets) return;
+    const range = rangeFromOffsets(map, offsets[0], offsets[1]);
     if (!range) return;
     mergeLineRects(Array.from(range.getClientRects())).forEach(r => {
       const d = document.createElement('div');
@@ -2435,7 +2722,10 @@ function noteAtPoint(x, y, map) {
   const holder = pos ? nodeEntry(map, pos.node) : null;
   if (holder) {
     const gi = holder.start + pos.offset;
-    const hit = notes.find(nt => gi >= nt.startOffset && gi < nt.endOffset);
+    const hit = notes.find(nt => {
+      const o = noteOffsets(map, nt);
+      return o && gi >= o[0] && gi < o[1];
+    });
     if (hit) return hit;
   }
 
@@ -2443,8 +2733,9 @@ function noteAtPoint(x, y, map) {
   // и точка легко «приземляется» в него, а не в текстовый слой. Тогда решаем
   // геометрией — попал ли тап в прямоугольники самой заметки.
   return notes.find(nt => {
-    if (nt.startOffset === undefined) return false;
-    const range = rangeFromOffsets(map, nt.startOffset, nt.endOffset);
+    const o = noteOffsets(map, nt);
+    if (!o) return false;
+    const range = rangeFromOffsets(map, o[0], o[1]);
     if (!range) return false;
     return mergeLineRects(Array.from(range.getClientRects()))
       .some(r => x >= r.left - 2 && x <= r.right + 2 && y >= r.top && y <= r.bottom);
@@ -2462,9 +2753,7 @@ document.getElementById('pdfContainer').addEventListener('click', e => {
   if (tlayer) {
     const map = pdfWordMaps.get(tlayer);
     if (map) {
-      // В текстовом режиме смещения свои (см. buildFlowPage) — заметки,
-      // сохранённые в постраничном режиме, по ним не ищем.
-      const note = map.flow ? null : noteAtPoint(e.clientX, e.clientY, map);
+      const note = noteAtPoint(e.clientX, e.clientY, map);
       if (note) { openNoteQuickBar(note, map); return; }
       closeNoteQuickBar();
       const word = wordAtPoint(e.clientX, e.clientY, map);
@@ -2607,9 +2896,6 @@ function applyOwnSelection(map, start, end) {
   pendingSelection = { text: map.text.slice(start, end), map, start, end };
   const range = rangeFromOffsets(map, start, end);
   if (range) renderSelectionPreview(map, range);
-  // В текстовом режиме доступен только перевод — маркер/заметка опираются на
-  // смещения постраничного режима (см. buildFlowPage).
-  document.getElementById('selToolbar').classList.toggle('notes-disabled', !!map.flow);
 }
 
 function cancelLongPress() {
@@ -2634,10 +2920,25 @@ function extendSelection(x, y) {
   if (!selecting || !lpMap || !lpAnchor) return;
   const word = wordAtPoint(x, y, lpMap);
   if (!word) return;
+
+  // Слово под пальцем захватываем целиком, только если палец прошёл его
+  // середину. Иначе, останавливаясь у самого начала слова, выделение забирало
+  // и его — а на конце абзаца это утаскивало первое слово следующего.
+  let start = word.start, end = word.end;
+  const range = rangeFromOffsets(lpMap, word.start, word.end);
+  if (range) {
+    const r = range.getBoundingClientRect();
+    if (r.width) {
+      const pastMiddle = x > r.left + r.width / 2;
+      if (word.start >= lpAnchor.end && !pastMiddle) end = word.start;       // тянем вперёд
+      else if (word.end <= lpAnchor.start && pastMiddle) start = word.end;   // тянем назад
+    }
+  }
+
   applyOwnSelection(
     lpMap,
-    Math.min(lpAnchor.start, word.start),
-    Math.max(lpAnchor.end, word.end),
+    Math.min(lpAnchor.start, start),
+    Math.max(lpAnchor.end, end),
   );
 }
 
@@ -2699,10 +3000,13 @@ function renderSelColors() {
 
 async function highlightSelection(color) {
   const sel = pendingSelection;
-  if (!sel || !sel.map || sel.map.flow || sel.start === undefined) return;
+  if (!sel || !sel.map || sel.start === undefined) return;
   const note = {
     id: newId(), page: sel.map.page,
     startOffset: sel.start, endOffset: sel.end,
+    // Режим, в котором считались смещения, — по нему noteOffsets решает,
+    // можно ли им верить или искать заметку по тексту.
+    mode: sel.map.flow ? 'flow' : 'page',
     text: sel.text, color, comment: '', createdAt: Date.now(),
   };
   currentBook.notes = (currentBook.notes || []).concat(note);
@@ -2906,16 +3210,13 @@ async function saveCurrentNote() {
   if (!currentText || !currentBookId) return;
   if ((currentBook.notes || []).some(n => n.text === currentText)) return;
   const info = panelSelectionInfo;
-  // Смещения текстового режима не совпадают со смещениями постраничного
-  // (см. buildFlowPage) — сохраняем текст заметки в любом режиме, но рамку-
-  // подсветку на странице привязываем к смещениям, только если они из
-  // постраничного режима, иначе она однажды нарисуется не в том месте.
-  const hasPageOffsets = info && info.map && !info.map.flow;
+  const hasOffsets = !!(info && info.map && info.start !== undefined);
   const note = {
     id: newId(),
     page: (info && info.map && info.map.page) || currentPageNumber(),
-    startOffset: hasPageOffsets ? info.start : undefined,
-    endOffset: hasPageOffsets ? info.end : undefined,
+    startOffset: hasOffsets ? info.start : undefined,
+    endOffset: hasOffsets ? info.end : undefined,
+    mode: info && info.map ? (info.map.flow ? 'flow' : 'page') : undefined,
     text: currentText,
     color: 'yellow',
     comment: document.getElementById('tpTranslation').textContent,
@@ -2924,7 +3225,7 @@ async function saveCurrentNote() {
   currentBook.notes = (currentBook.notes || []).concat(note);
   await idbUpdateBook(currentBookId, { notes: currentBook.notes });
   scheduleBookSync(currentBook);
-  if (hasPageOffsets) drawHighlights(info.map);
+  if (hasOffsets) drawHighlights(info.map);
   updateSaveButton();
 }
 
@@ -3267,6 +3568,12 @@ document.getElementById('chromeBookmark').addEventListener('click', addBookmark)
 document.getElementById('chromeMenu').addEventListener('click', () => currentBookId && openBookSheet(currentBookId));
 document.getElementById('chromeReadMode').addEventListener('click', () => switchReadMode(readMode === 'flow' ? 'page' : 'flow'));
 document.getElementById('pageIndicator').addEventListener('click', openNavSheet);
+let navSearchTimer = null;
+document.getElementById('navSearch').addEventListener('input', e => {
+  const q = e.target.value;
+  clearTimeout(navSearchTimer);
+  navSearchTimer = setTimeout(() => runBookSearch(q), 250);
+});
 document.getElementById('navSlider').addEventListener('input', e => {
   document.getElementById('navPage').textContent = e.target.value;
 });
