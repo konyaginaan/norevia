@@ -168,6 +168,22 @@
   .btn-outline:active { opacity: 0.6; }
   .btn-outline:disabled { opacity: 1; color: var(--accent); border-color: var(--accent); cursor: default; }
   .add-row { padding: 16px 0 8px; text-align: center; }
+  .lib-notice {
+    background: var(--accent-soft); color: var(--text);
+    border-radius: 12px; padding: 10px 14px;
+    font-size: 13px; line-height: 1.4; margin-bottom: 12px;
+  }
+  /* Плашка «на другом устройстве ты дальше»: sticky, как и вся шапка читалки —
+     fixed в вебвью Telegram ненадёжен. Отступ сверху под шапку ставит JS. */
+  .jump-bar {
+    position: sticky; top: 0; z-index: 25;
+    display: flex; align-items: center; gap: 6px;
+    margin: 8px 1rem 0; padding: 8px 8px 8px 14px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; box-shadow: 0 4px 14px var(--shadow);
+    font-size: 13px; line-height: 1.35;
+  }
+  .jump-bar span { flex: 1; }
 
   #pdfFileInput { display: none; }
 
@@ -430,6 +446,7 @@
     <div class="screen-title">Библиотека</div>
     <button class="btn-link" id="addBookBtn" aria-label="Добавить книгу"></button>
   </div>
+  <div class="lib-notice" id="libNotice" style="display:none"></div>
   <div class="search-wrap">
     <span class="search-icon" id="searchIcon"></span>
     <input class="search-input" id="searchInput" type="search" placeholder="Поиск по названию или автору" autocomplete="off">
@@ -452,6 +469,12 @@
     <div class="chrome-title" id="chromeTitle"></div>
     <button class="chrome-btn" id="chromeBookmark" aria-label="Добавить закладку"></button>
     <button class="chrome-btn" id="chromeMenu" aria-label="Меню книги"></button>
+  </div>
+  <!-- «На другом устройстве ты дальше» — предложение перейти, не прыжок -->
+  <div class="jump-bar" id="jumpBar" style="display:none">
+    <span id="jumpText"></span>
+    <button class="sel-btn" id="jumpGo" type="button">Перейти</button>
+    <button class="chrome-btn" id="jumpClose" type="button" aria-label="Скрыть"></button>
   </div>
   <div id="pdfContainer"></div>
   <div class="page-indicator" id="pageIndicator"></div>
@@ -810,6 +833,7 @@ function scheduleBookSync(book) {
   csDebounce(key, () => csWriteJSON(key, {
     title: book.title, author: book.author, sourceLang: book.sourceLang,
     currentPage: book.currentPage, scrollPos: book.scrollPos,
+    posAt: book.posAt || 0, // когда позицию меняли — чтобы другое устройство поняло, кто свежее
     notes: book.notes || [], bookmarks: book.bookmarks || [],
   }));
 }
@@ -832,17 +856,29 @@ async function mergeBookFromCloud(book) {
   const bookmarks = mergeById(book.bookmarks, data.bookmarks);
   if (notes.length !== (book.notes || []).length) patch.notes = notes;
   if (bookmarks.length !== (book.bookmarks || []).length) patch.bookmarks = bookmarks;
-  // Место чтения подтягиваем, только если локально книгу ещё не открывали,
-  // иначе облако откатило бы назад более свежую локальную позицию.
+  // Место чтения: если книгу здесь ещё не открывали — просто восстанавливаем.
+  // Если открывали, но на другом устройстве ушли дальше (его отметка времени
+  // свежее) — не прыгаем сами, а готовим предложение «Перейти» (см. openBook).
+  // Запас в 3 секунды гасит ложные срабатывания от расхождения часов.
   if ((book.currentPage || 1) <= 1 && data.currentPage > 1) {
     patch.currentPage = data.currentPage;
     patch.scrollPos = data.scrollPos || 0;
+    patch.posAt = data.posAt || Date.now();
+  } else if (
+    data.posAt && data.posAt > (book.posAt || 0) + 3000 &&
+    data.currentPage && data.currentPage !== book.currentPage
+  ) {
+    pendingCloudPos = { bookId: book.id, page: data.currentPage };
   }
   if (!Object.keys(patch).length) return;
   Object.assign(book, patch);
   await idbUpdateBook(book.id, patch);
   if (currentBookId === book.id && patch.notes) redrawAllHighlights();
 }
+
+// «На другом устройстве ты на стр. N» — заполняется в mergeBookFromCloud,
+// показывается плашкой после открытия книги.
+let pendingCloudPos = null;
 
 const CS_WORDS_KEY = 'fw_words';
 function scheduleWordsSync() {
@@ -1203,6 +1239,9 @@ async function openBookSheet(id) {
   add('trash', 'Удалить книгу', false, async () => {
     const name = book.title || stripExt(book.name);
     if (!confirm(`Удалить «${name}»?\n\nКнига, её закладки и заметки будут стёрты безвозвратно.`)) return;
+    // Метка «удалена сознательно»: иначе авто-скачивание из чата вернуло бы
+    // книгу при следующем же открытии библиотеки.
+    if (book.chatId) { chatTombstones.add(book.chatId); saveChatTombstones(); }
     await idbDeleteBook(id);
     if (currentBookId === id) currentBookId = null;
     closeAllSheets(); renderLibrary();
@@ -1297,6 +1336,24 @@ function serverFetch(path, opts = {}) {
 }
 
 const chatDownloading = new Set();
+const chatAutoFailed = new Set(); // авто-скачивание не удалось — не долбить сервер, отдать в ручной список
+
+// Книги из чата скачиваются в библиотеку САМИ. Единственное исключение —
+// книга, которую здесь удалили вручную: без этой метки она воскресала бы
+// после каждого удаления. Такие остаются в разделе «Из чата» — вернуть можно,
+// но осознанным тапом. Метка снимается при повторном скачивании.
+const STORAGE_CHAT_TOMB = 'reader_chat_tombstones_v1';
+const chatTombstones = new Set(JSON.parse(localStorage.getItem(STORAGE_CHAT_TOMB) || '[]'));
+function saveChatTombstones() { localStorage.setItem(STORAGE_CHAT_TOMB, JSON.stringify([...chatTombstones])); }
+
+let libNoticeTimer = null;
+function showLibNotice(text) {
+  const el = document.getElementById('libNotice');
+  el.textContent = text;
+  el.style.display = '';
+  clearTimeout(libNoticeTimer);
+  libNoticeTimer = setTimeout(() => { el.style.display = 'none'; }, 5000);
+}
 
 async function loadChatBooks(localBooks) {
   const wrap = document.getElementById('chatBooksWrap');
@@ -1315,20 +1372,27 @@ async function loadChatBooks(localBooks) {
   const local = localBooks || await idbGetAllBooks();
   syncLocalBooksToChat(local).catch(() => {});
   const have = new Set(local.map(b => b.chatId).filter(Boolean));
-  const fresh = books.filter(b => !have.has(b.id));
+  const fresh = books.filter(b => !have.has(b.id) && !chatDownloading.has(b.id));
+
+  const auto = fresh.filter(b => !chatTombstones.has(b.id) && !chatAutoFailed.has(b.id));
+  if (auto.length) autoDownloadChatBooks(auto);
+
+  // В ручном списке — удалённые локально и те, что не скачались сами.
+  const manual = fresh.filter(b => chatTombstones.has(b.id) || chatAutoFailed.has(b.id));
   const list = document.getElementById('chatBooksList');
-  if (!fresh.length) { wrap.style.display = 'none'; list.innerHTML = ''; return; }
+  if (!manual.length) { wrap.style.display = 'none'; list.innerHTML = ''; return; }
 
   list.innerHTML = '';
-  fresh.forEach(b => {
+  manual.forEach(b => {
     const row = document.createElement('div');
     row.className = 'row';
     const main = document.createElement('div');
     main.className = 'row-main';
     main.innerHTML = `<div class="row-title"></div><div class="row-sub"></div>`;
     main.querySelector('.row-title').textContent = stripExt(b.name);
-    main.querySelector('.row-sub').textContent = [fmtSize(b.size), 'нажми, чтобы скачать'].filter(Boolean).join(' · ');
-    main.addEventListener('click', () => downloadChatBook(b, row));
+    const hint = chatAutoFailed.has(b.id) ? 'не скачалась — нажми ещё раз' : 'удалена здесь · нажми, чтобы вернуть';
+    main.querySelector('.row-sub').textContent = [fmtSize(b.size), hint].filter(Boolean).join(' · ');
+    main.addEventListener('click', () => downloadChatBook(b, row).catch(() => {}));
     const del = document.createElement('button');
     del.className = 'row-del';
     del.type = 'button';
@@ -1352,26 +1416,46 @@ async function loadChatBooks(localBooks) {
   wrap.style.display = '';
 }
 
+// Фоновая догрузка новых книг из чата — по одной, с плашкой наверху библиотеки.
+async function autoDownloadChatBooks(list) {
+  for (const b of list) {
+    try {
+      await downloadChatBook(b, null);
+      showLibNotice(`Из чата: «${stripExt(b.name)}» уже в библиотеке`);
+    } catch (e) {
+      console.warn('авто-скачивание не удалось', b.name, e);
+      chatAutoFailed.add(b.id);
+    }
+  }
+  if (activeTab === 'view-library') renderLibrary();
+}
+
 function fmtSize(bytes) {
   if (!bytes) return '';
   const mb = bytes / 1048576;
   return mb >= 1 ? mb.toFixed(1).replace('.', ',') + ' МБ' : Math.max(1, Math.round(bytes / 1024)) + ' КБ';
 }
 
+// row задан — ручное скачивание из списка (открываем книгу сразу),
+// row === null — тихое авто-скачивание в библиотеку.
 async function downloadChatBook(b, row) {
   if (chatDownloading.has(b.id)) return;
   chatDownloading.add(b.id);
-  const sub = row.querySelector('.row-sub');
-  sub.textContent = 'Скачиваю…';
+  const sub = row && row.querySelector('.row-sub');
+  if (sub) sub.textContent = 'Скачиваю…';
   try {
     const r = await serverFetch('/file?id=' + encodeURIComponent(b.id));
     if (!r.ok) throw new Error('http ' + r.status);
     const buf = await r.arrayBuffer();
     const record = await addBookFromBuffer(b.name, buf, { chatId: b.id });
-    await openBook(record.id);
+    chatTombstones.delete(b.id);
+    chatAutoFailed.delete(b.id);
+    saveChatTombstones();
+    if (row) await openBook(record.id);
+    return record;
   } catch (e) {
-    console.warn('скачивание не удалось', e);
-    sub.textContent = 'Не получилось скачать — попробуй ещё раз';
+    if (sub) sub.textContent = 'Не получилось скачать — попробуй ещё раз';
+    throw e;
   } finally {
     chatDownloading.delete(b.id);
   }
@@ -1421,14 +1505,39 @@ async function openBook(id) {
   // Облако может вернуть заметки и место чтения — например, если книгу
   // добавили заново после чистки вебвью. Ждём недолго, чтобы не задерживать
   // открытие: не успеет — заметки подтянутся и перерисуются чуть позже сами.
+  hideJumpBar();
   await Promise.race([
     mergeBookFromCloud(book).catch(() => {}),
     new Promise(r => setTimeout(r, 1200)),
   ]);
   await renderPdf(book.data, book.scrollPos || 0);
   idbUpdateBook(id, { lastOpenedAt: Date.now() });
+  if (pendingCloudPos && pendingCloudPos.bookId === id) {
+    showJumpBar(pendingCloudPos.page);
+    pendingCloudPos = null;
+  }
   return true;
 }
+
+// ── «Ты остановилась дальше на другом устройстве» ──
+function showJumpBar(page) {
+  const bar = document.getElementById('jumpBar');
+  document.getElementById('jumpText').textContent = `На другом устройстве ты на стр. ${page}`;
+  // Плашка sticky и должна вставать ПОД шапку читалки, высота которой зависит
+  // от устройства — меряем по факту.
+  bar.style.top = (document.getElementById('readerChrome').offsetHeight || 0) + 6 + 'px';
+  bar.dataset.page = page;
+  bar.style.display = 'flex';
+}
+function hideJumpBar() { document.getElementById('jumpBar').style.display = 'none'; }
+
+document.getElementById('jumpGo').addEventListener('click', () => {
+  const page = parseInt(document.getElementById('jumpBar').dataset.page || '0', 10);
+  const target = currentPages[page - 1];
+  if (target) target.wrap.scrollIntoView();
+  hideJumpBar();
+});
+document.getElementById('jumpClose').addEventListener('click', hideJumpBar);
 
 async function renderPdf(arrayBuffer, savedScroll) {
   const container = document.getElementById('pdfContainer');
@@ -1476,7 +1585,7 @@ function onReaderScroll() {
   clearTimeout(scrollSaveTimer);
   scrollSaveTimer = setTimeout(() => {
     if (!currentBookId) return;
-    const patch = { scrollPos: window.scrollY, currentPage: currentPageNumber() };
+    const patch = { scrollPos: window.scrollY, currentPage: currentPageNumber(), posAt: Date.now() };
     idbUpdateBook(currentBookId, patch);
     if (currentBook) { Object.assign(currentBook, patch); scheduleBookSync(currentBook); }
   }, 250);
@@ -2416,6 +2525,7 @@ document.getElementById('searchIcon').innerHTML = icon('search');
 document.getElementById('addBookBtn').innerHTML = icon('plus');
 document.getElementById('chromeBack').innerHTML = icon('back');
 document.getElementById('chromeBookmark').innerHTML = icon('bookmark');
+document.getElementById('jumpClose').innerHTML = icon('close', 'icon-sm');
 document.getElementById('chromeMenu').innerHTML = icon('more');
 document.getElementById('tpClose').innerHTML = icon('close', 'icon-sm');
 applyAppearance();
