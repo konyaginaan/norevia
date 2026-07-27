@@ -166,6 +166,7 @@
     display: inline-flex; align-items: center; gap: 7px;
   }
   .btn-outline:active { opacity: 0.6; }
+  .btn-outline:disabled { opacity: 1; color: var(--accent); border-color: var(--accent); cursor: default; }
   .add-row { padding: 16px 0 8px; text-align: center; }
 
   #pdfFileInput { display: none; }
@@ -501,6 +502,14 @@
     <div class="set-label">Язык перевода</div>
     <div class="tp-langs" id="setTargetLangs"></div>
     <div class="set-hint">Язык книги определяется для каждой книги отдельно — его можно поменять в панели перевода.</div>
+  </div>
+
+  <!-- Показывается только внутри Telegram и только если иконку ещё можно
+       добавить — см. initHomeScreenButton. -->
+  <div class="set-group" id="homeScreenGroup" style="display:none">
+    <div class="set-label">Быстрый доступ</div>
+    <button class="btn-outline" id="btnAddHomeScreen" type="button"></button>
+    <div class="set-hint">Иконка появится на домашнем экране телефона, и книги будут открываться одним касанием — без захода в чат с ботом.</div>
   </div>
 </div>
 
@@ -2174,6 +2183,36 @@ function setZoom(next) {
 }
 
 // ══════════════════════════════════════════════════════════════
+// ИКОНКА НА ДОМАШНЕМ ЭКРАНЕ
+// ══════════════════════════════════════════════════════════════
+// Нативная возможность Telegram (Bot API 8.0+). Методов, которых нет в
+// клиенте, не просто «нет» — обращение к ним бросает исключение, поэтому и
+// проверка, и сам вызов обёрнуты в try/catch. Кнопку показываем только когда
+// иконку реально можно добавить: вне Telegram, на старом клиенте и когда
+// ярлык уже стоит — группа настроек остаётся скрытой.
+function initHomeScreenButton() {
+  const group = document.getElementById('homeScreenGroup');
+  const btn = document.getElementById('btnAddHomeScreen');
+  btn.innerHTML = icon('plus') + 'Добавить на домашний экран';
+  if (!tg || typeof tg.checkHomeScreenStatus !== 'function') return;
+  try {
+    tg.checkHomeScreenStatus(status => {
+      if (status === 'added' || status === 'unsupported') return;
+      group.style.display = '';
+    });
+    tg.onEvent('homeScreenAdded', () => {
+      btn.innerHTML = icon('check') + 'Добавлено на домашний экран';
+      btn.disabled = true;
+    });
+  } catch (e) { console.warn('checkHomeScreenStatus недоступен', e); }
+}
+
+document.getElementById('btnAddHomeScreen').addEventListener('click', () => {
+  if (!tg) return;
+  try { tg.addToHomeScreen(); } catch (e) { console.warn('addToHomeScreen не сработал', e); }
+});
+
+// ══════════════════════════════════════════════════════════════
 // ШТОРКИ
 // ══════════════════════════════════════════════════════════════
 function openSheet(id) {
@@ -2239,6 +2278,7 @@ applyAppearance();
 renderSelColors();
 renderTabbar();
 showTab('view-library');
+initHomeScreenButton();
 mergeWordsFromCloud().catch(() => {});
 </script>
 </body>
