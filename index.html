@@ -497,6 +497,11 @@
     padding: 6px; border-radius: 9px; flex-shrink: 0; display: flex;
   }
   .row-del:active { background: var(--surface-2); color: #C1554F; }
+  .row-act {
+    background: none; border: none; cursor: pointer; color: var(--muted);
+    padding: 6px; border-radius: 9px; flex-shrink: 0; display: flex;
+  }
+  .row-act:active { background: var(--surface-2); color: var(--text); }
   .section-label {
     font-size: 12px; font-weight: 800; color: var(--muted); text-transform: uppercase;
     letter-spacing: 0.05em; padding: 14px 2px 2px;
@@ -575,7 +580,6 @@
   </div>
   <div id="pdfContainer"></div>
   <button class="page-indicator" id="pageIndicator" type="button" aria-label="Перейти к странице"></button>
-  <div class="reader-note" id="readerNote"></div>
 </div>
 
 <!-- ═════════ ЗАКЛАДКИ ═════════ -->
@@ -686,22 +690,27 @@
   <div class="note-quote" id="noteQuote"></div>
   <div class="sel-colors" id="noteColors" style="margin-bottom:14px;"></div>
   <textarea class="note-input" id="noteInput" placeholder="Комментарий к выделенному (необязательно)"></textarea>
+  <button class="btn-wide" id="noteCopy" style="margin-bottom:9px">Скопировать</button>
   <div class="sheet-actions">
     <button class="btn-wide" id="noteDelete"></button>
     <button class="btn-wide done" id="noteSave">Сохранить</button>
   </div>
 </div>
 
+<div class="reader-note" id="readerNote"></div>
+
 <div class="sel-toolbar" id="selToolbar">
   <div class="sel-colors" id="selColors"></div>
   <div class="sel-div"></div>
   <button class="sel-btn" id="selTranslate">Перевести</button>
+  <button class="sel-btn" id="selCopy" aria-label="Скопировать"></button>
 </div>
 
 <div class="sel-toolbar" id="noteQuickBar">
   <div class="sel-colors" id="noteQuickColors"></div>
   <div class="sel-div"></div>
   <button class="sel-btn" id="noteQuickEdit" aria-label="Комментарий"></button>
+  <button class="sel-btn" id="noteQuickCopy" aria-label="Скопировать"></button>
   <button class="sel-btn" id="noteQuickDelete" aria-label="Удалить маркер"></button>
 </div>
 
@@ -2331,13 +2340,54 @@ function updatePageIndicator() {
 }
 
 let readerNoteTimer = null;
-function showReaderNote(text) {
+function showReaderNote(text, ms = 5200) {
   const el = document.getElementById('readerNote');
   el.textContent = text;
   el.classList.add('show');
   clearTimeout(readerNoteTimer);
-  readerNoteTimer = setTimeout(() => el.classList.remove('show'), 5200);
+  readerNoteTimer = setTimeout(() => el.classList.remove('show'), ms);
 }
+
+// ── копирование ──
+// navigator.clipboard в вебвью Telegram есть не всегда (и требует защищённого
+// контекста), поэтому за ним оставлен старый способ через скрытое поле — он
+// работает везде, но только внутри обработчика реального нажатия.
+async function copyText(text) {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+  } catch (e) { console.warn('clipboard API не сработал, пробуем запасной путь', e); }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = value;
+    // Поле должно быть в документе и не должно уводить экран к себе.
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none;';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, value.length);
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch (e) {
+    console.warn('скопировать не удалось', e);
+    return false;
+  }
+}
+
+async function copyAndTell(text) {
+  const ok = await copyText(text);
+  showReaderNote(ok ? 'Скопировано' : 'Не удалось скопировать', 2000);
+  return ok;
+}
+
+// Текст заметки для копирования: сам фрагмент, а под ним комментарий —
+// перевод или свой, если он есть. Иначе из буфера выпадала бы половина смысла.
+const noteToText = nt => [nt.text, nt.comment].filter(x => x && x.trim()).join('\n\n');
 
 // ── переход по книге ──
 function goToPage(num) {
@@ -3067,9 +3117,13 @@ function openNoteQuickBar(note, map) {
     colors.append(b);
   });
   document.getElementById('noteQuickEdit').innerHTML = icon('note');
+  document.getElementById('noteQuickCopy').innerHTML = icon('copy');
   document.getElementById('noteQuickDelete').innerHTML = icon('trash');
 
-  const range = rangeFromOffsets(map, note.startOffset, note.endOffset);
+  // Через noteOffsets, а не по сырым смещениям: заметка могла быть поставлена
+  // в другом режиме, тогда её место ищется по тексту (см. noteOffsets).
+  const o = noteOffsets(map, note);
+  const range = o ? rangeFromOffsets(map, o[0], o[1]) : null;
   const rect = range ? range.getBoundingClientRect() : map.wrap.getBoundingClientRect();
   positionFloatingBar(document.getElementById('noteQuickBar'), rect);
 }
@@ -3079,6 +3133,11 @@ document.getElementById('noteQuickEdit').addEventListener('click', () => {
   const { note } = quickBarNote;
   closeNoteQuickBar();
   openNoteSheet(note);
+});
+document.getElementById('noteQuickCopy').addEventListener('click', () => {
+  if (!quickBarNote) return;
+  copyAndTell(noteToText(quickBarNote.note));
+  closeNoteQuickBar();
 });
 document.getElementById('noteQuickDelete').addEventListener('click', async () => {
   if (!quickBarNote) return;
@@ -3112,6 +3171,7 @@ function openNoteSheet(note) {
     colors.append(b);
   });
   document.getElementById('noteDelete').innerHTML = icon('trash') + 'Удалить';
+  document.getElementById('noteCopy').innerHTML = icon('copy') + 'Скопировать';
   openSheet('noteSheet');
 }
 
@@ -3349,6 +3409,13 @@ async function renderNotes() {
       const target = currentPages[nt.page - 1];
       if (target) requestAnimationFrame(() => target.wrap.scrollIntoView({ block: 'center' }));
     });
+    const copy = document.createElement('button');
+    copy.className = 'row-act';
+    copy.type = 'button';
+    copy.setAttribute('aria-label', 'Скопировать заметку');
+    copy.innerHTML = icon('copy', 'icon-sm');
+    copy.addEventListener('click', () => copyAndTell(noteToText(nt)));
+
     const del = document.createElement('button');
     del.className = 'row-del';
     del.type = 'button';
@@ -3362,7 +3429,7 @@ async function renderNotes() {
       if (currentBookId === book.id) { currentBook.notes = rest; redrawAllHighlights(); }
       renderNotes();
     });
-    row.append(main, del);
+    row.append(main, copy, del);
     list.append(row);
   });
   body.append(list);
@@ -3561,6 +3628,11 @@ document.getElementById('backdrop').addEventListener('click', closeAllSheets);
 document.getElementById('tpClose').addEventListener('click', closeAllSheets);
 document.getElementById('tpSave').addEventListener('click', handleTpSave);
 document.getElementById('selTranslate').addEventListener('click', translateSelection);
+document.getElementById('selCopy').addEventListener('click', () => {
+  const sel = pendingSelection;
+  document.getElementById('selToolbar').classList.remove('show');
+  if (sel && sel.text) copyAndTell(sel.text);
+});
 document.getElementById('addBookBtn').addEventListener('click', pickFile);
 document.getElementById('pdfFileInput').addEventListener('change', e => handleBookFile(e.target.files[0]));
 document.getElementById('chromeBack').addEventListener('click', () => showTab(activeTab));
@@ -3601,6 +3673,15 @@ document.getElementById('noteSave').addEventListener('click', async () => {
   editingNote.comment = document.getElementById('noteInput').value.trim();
   await persistNote();
   closeAllSheets();
+});
+document.getElementById('noteCopy').addEventListener('click', () => {
+  if (!editingNote) return;
+  // Комментарий берём из поля, а не из записи: его могли только что дописать
+  // и ещё не нажать «Сохранить».
+  copyAndTell(noteToText({
+    text: editingNote.text,
+    comment: document.getElementById('noteInput').value,
+  }));
 });
 document.getElementById('noteDelete').addEventListener('click', async () => {
   if (!editingNote) return;
