@@ -264,12 +264,34 @@
     position: static; inset: auto; overflow: visible;
     line-height: 1.6; text-align: justify; forced-color-adjust: auto;
     font-size: calc(17px * var(--flow-scale, 1)); color: var(--text);
+    /* Выключка по ширине на узком экране рвёт строку дырами между словами —
+       переносы их закрывают. Язык проставляем на контейнере (см. рендер),
+       иначе браузеру нечем переносить. */
+    -webkit-hyphens: auto; hyphens: auto;
   }
+  /* Главы не должны стыковаться вплотную — иначе конец одной читается как
+     продолжение следующей. */
+  .flow-page + .flow-page { margin-top: 1.6em; }
   .flow-text p { margin: 0 0 1em; }
   .flow-text span, .flow-text br {
     color: inherit; position: static; white-space: normal; cursor: text;
   }
   .flow-text ::selection { background: transparent; }
+  /* Разметка из EPUB: книга приносит свою структуру (заголовки, списки,
+     картинки), поэтому ей нужны свои отступы — .flow-text рассчитан только
+     на абзацы, собранные из PDF. */
+  .epub-text h1, .epub-text h2, .epub-text h3,
+  .epub-text h4, .epub-text h5, .epub-text h6 {
+    font-size: 1.25em; line-height: 1.3; margin: 1.4em 0 0.6em; text-align: left;
+  }
+  .epub-text h1 { font-size: 1.5em; }
+  .epub-text img { max-width: 100%; height: auto; display: block; margin: 1em auto; border-radius: 4px; }
+  .epub-text blockquote { margin: 1em 0 1em 1em; padding-left: 0.9em; border-left: 2px solid var(--border); color: var(--muted); }
+  .epub-text ul, .epub-text ol { margin: 0 0 1em 1.2em; padding: 0; }
+  .epub-text li { margin-bottom: 0.35em; }
+  .epub-text hr { border: none; border-top: 1px solid var(--border); margin: 1.6em 0; }
+  .epub-text table { width: 100%; border-collapse: collapse; margin-bottom: 1em; font-size: 0.92em; }
+  .epub-text td, .epub-text th { border: 1px solid var(--border); padding: 5px 7px; text-align: left; }
   .flow-stub {
     padding: 18px 0; text-align: center; color: var(--muted);
     font-size: 12px; opacity: 0.6;
@@ -318,7 +340,7 @@
   .chrome-btn:active { background: var(--surface-2); }
   .chrome-btn.on { color: var(--accent); }
   .chrome-zoom { font-family: inherit; font-size: 13px; font-weight: 700; padding: 7px 8px; }
-  .chrome-zoom.hidden { display: none; }
+  .chrome-zoom.hidden, .chrome-btn.hidden { display: none; }
 
   .page-indicator {
     position: sticky; bottom: 16px; align-self: center;
@@ -517,7 +539,7 @@
     <div class="set-label" style="margin:18px 0 10px">Не удалось скачать</div>
     <div class="list" id="chatBooksList"></div>
   </div>
-  <input type="file" id="pdfFileInput" accept="application/pdf">
+  <input type="file" id="pdfFileInput" accept="application/pdf,application/epub+zip,.pdf,.epub">
 </div>
 
 <!-- ═════════ ЧТЕНИЕ ═════════ -->
@@ -813,7 +835,7 @@ const idbUpdateBook = (id, patch) => idbTx('readwrite', store => {
   };
 });
 
-function stripExt(name) { return String(name || '').replace(/\.pdf$/i, '').trim(); }
+function stripExt(name) { return String(name || '').replace(/\.(pdf|epub)$/i, '').trim(); }
 
 const translateCache = JSON.parse(localStorage.getItem(STORAGE_CACHE) || '{}');
 function saveTranslateCache() { localStorage.setItem(STORAGE_CACHE, JSON.stringify(translateCache)); }
@@ -1193,8 +1215,8 @@ async function renderLibrary() {
     body.innerHTML = `<div class="empty">
       <div class="empty-icon">${icon('book')}</div>
       <div class="empty-title">Библиотека пуста</div>
-      <div>Открой PDF — потом можно тапнуть по слову или выделить фразу, чтобы увидеть перевод, а важное отметить маркером.</div>
-      <button class="btn-primary" id="emptyAdd">${icon('plus')}Открыть PDF</button>
+      <div>Открой PDF или EPUB — потом можно тапнуть по слову или выделить фразу, чтобы увидеть перевод, а важное отметить маркером.</div>
+      <button class="btn-primary" id="emptyAdd">${icon('plus')}Открыть книгу</button>
     </div>`;
     document.getElementById('emptyAdd').addEventListener('click', pickFile);
     return;
@@ -1236,7 +1258,9 @@ function bookCard(book) {
   const card = document.createElement('div');
   card.className = 'book-card';
   const pct = book.pageCount ? Math.round((book.currentPage || 1) / book.pageCount * 100) : 0;
-  const meta = book.pageCount ? `Стр. ${book.currentPage || 1} из ${book.pageCount}` : 'Ещё не открыта';
+  // У EPUB считаем главы: страниц в файле нет, они появляются только при вёрстке.
+  const unit = book.kind === 'epub' ? 'Глава' : 'Стр.';
+  const meta = book.pageCount ? `${unit} ${book.currentPage || 1} из ${book.pageCount}` : 'Ещё не открыта';
 
   const open = document.createElement('button');
   open.className = 'book-open';
@@ -1354,10 +1378,12 @@ let currentPages = [];
 let chromeVisible = true;
 let currentBookId = null;
 let currentBook = null;
+let currentKind = 'pdf'; // 'pdf' | 'epub' — чем открыта текущая книга
 
 async function addBookFromBuffer(name, buf, extra = {}) {
   const record = {
     id: newId(), name, data: buf,
+    kind: isEpubName(name) ? 'epub' : 'pdf',
     // Отпечаток файла — по нему книга находит свои заметки в облаке даже
     // после переустановки, когда id записи будет уже другой.
     fp: fileFingerprint(name, buf.byteLength),
@@ -1371,11 +1397,11 @@ async function addBookFromBuffer(name, buf, extra = {}) {
     ...extra,
   };
   await idbAddBook(record);
-  buildBookMeta(record.id, buf).catch(() => {});
+  buildBookMeta(record.id, buf, record.kind).catch(() => {});
   return record;
 }
 
-async function handlePdfFile(file) {
+async function handleBookFile(file) {
   if (!file) return;
   const record = await addBookFromBuffer(file.name, await file.arrayBuffer());
   uploadToChat(record).catch(() => {});
@@ -1405,7 +1431,7 @@ async function uploadToChat(record) {
   try {
     const r = await serverFetch('/upload?name=' + encodeURIComponent(record.name), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/pdf' },
+      headers: { 'Content-Type': record.kind === 'epub' ? 'application/epub+zip' : 'application/pdf' },
       body: record.data,
     });
     if (!r.ok) { console.warn('копия в чат не ушла: http', r.status); return; }
@@ -1560,7 +1586,8 @@ async function downloadChatBook(b, row) {
 }
 
 // Метаданные и обложка считаются в фоне: открытие книги не должно их ждать.
-async function buildBookMeta(id, buf) {
+async function buildBookMeta(id, buf, kind) {
+  if (kind === 'epub') return buildEpubMeta(id, buf);
   const doc = await pdfjsLib.getDocument({ data: buf.slice(0) }).promise;
   const patch = { pageCount: doc.numPages };
 
@@ -1623,12 +1650,27 @@ async function openBook(id) {
     mergeBookFromCloud(book).catch(() => {}),
     new Promise(r => setTimeout(r, 1200)),
   ]);
+  // У EPUB постраничного режима нет и быть не может — там нет «страниц»,
+  // только главы. Переключатель режима для него прячем, а чтение всегда
+  // текстовое; для PDF возвращаем сохранённый выбор.
+  currentKind = book.kind === 'epub' ? 'epub' : 'pdf';
+  if (currentKind === 'epub') readMode = 'flow';
+  else readMode = localStorage.getItem(STORAGE_READ_MODE) === 'page' ? 'page' : 'flow';
   updateReadModeUiForBook();
-  await renderPdf(book.data, {
+
+  const restore = {
     scrollPos: book.scrollPos || 0,
     page: book.currentPage || 1,
     posMode: book.posMode || 'page',
-  });
+  };
+  if (currentKind === 'epub') {
+    await renderEpub(book.data, {
+      page: restore.page,
+      scrollPos: restore.posMode === 'flow' ? restore.scrollPos : 0,
+    });
+  } else {
+    await renderPdf(book.data, restore);
+  }
   idbUpdateBook(id, { lastOpenedAt: Date.now() });
   if (pendingCloudPos && pendingCloudPos.bookId === id) {
     showJumpBar(pendingCloudPos.page);
@@ -1734,6 +1776,7 @@ async function renderPdfFlow(doc, restore) {
 
   const flowWrap = document.createElement('div');
   flowWrap.className = 'flow-container';
+  flowWrap.lang = sourceLang; // без языка браузеру нечем расставлять переносы
   const pageInfos = [];
   let pagesWithText = 0;
   for (let i = 1; i <= doc.numPages; i++) {
@@ -1874,6 +1917,252 @@ async function buildFlowPage(page, wrap, pageNum) {
   const map = { text, nodes, page: pageNum, hlLayer, wrap, layer: textEl, flow: true };
   pdfWordMaps.set(textEl, map);
   return true;
+}
+
+// ══════════════════════════════════════════════════════════════
+// EPUB
+// ══════════════════════════════════════════════════════════════
+// EPUB — это zip с XHTML-главами внутри. Своей вёрстки у него нет вовсе,
+// текст изначально предполагает перетекание, поэтому он ложится прямо на
+// текстовый режим: главы становятся такими же «страницами», а тап по слову,
+// выделение и перевод работают тем же кодом (те же .textLayer + pdfWordMaps).
+// Распаковщик грузим только когда открыли EPUB — читателям PDF он не нужен.
+let jsZipPromise = null;
+const loadJSZip = () => (jsZipPromise = jsZipPromise
+  || import('https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm').then(m => m.default || m));
+
+const isEpubName = name => /\.epub$/i.test(String(name || ''));
+
+// Пути внутри epub относительные и сплошь с «../» — сводим их к тому виду,
+// в котором лежат записи zip.
+function zipResolve(baseDir, href) {
+  const clean = decodeURIComponent(String(href || '').split('#')[0]);
+  const out = [];
+  for (const part of (baseDir + clean).split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') out.pop();
+    else out.push(part);
+  }
+  return out.join('/');
+}
+
+async function readEpub(buf) {
+  const JSZip = await loadJSZip();
+  const zip = await JSZip.loadAsync(buf);
+  const parser = new DOMParser();
+
+  const containerFile = zip.file('META-INF/container.xml');
+  if (!containerFile) throw new Error('это не EPUB: нет META-INF/container.xml');
+  const container = parser.parseFromString(await containerFile.async('string'), 'application/xml');
+  const rootfile = container.querySelector('rootfile');
+  const opfPath = rootfile && rootfile.getAttribute('full-path');
+  if (!opfPath) throw new Error('в EPUB не указан OPF');
+  const opfDir = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/') + 1) : '';
+
+  const opf = parser.parseFromString(await zip.file(opfPath).async('string'), 'application/xml');
+  const manifest = new Map();
+  opf.querySelectorAll('manifest > item').forEach(it => {
+    manifest.set(it.getAttribute('id'), {
+      id: it.getAttribute('id'),
+      href: it.getAttribute('href') || '',
+      type: it.getAttribute('media-type') || '',
+      props: it.getAttribute('properties') || '',
+    });
+  });
+
+  const spine = Array.from(opf.querySelectorAll('spine > itemref'))
+    .map(ref => manifest.get(ref.getAttribute('idref')))
+    .filter(item => item && /html/.test(item.type));
+
+  const pick = tag => {
+    const el = Array.from(opf.getElementsByTagName('*'))
+      .find(n => n.localName === tag && n.textContent.trim());
+    return el ? el.textContent.trim() : '';
+  };
+
+  // Обложка помечается по-разному в зависимости от версии EPUB: в 3.0 это
+  // properties="cover-image" у элемента манифеста, в 2.0 — отдельная мета.
+  let coverItem = Array.from(manifest.values()).find(i => /cover-image/.test(i.props));
+  if (!coverItem) {
+    const meta = Array.from(opf.getElementsByTagName('meta'))
+      .find(m => (m.getAttribute('name') || '').toLowerCase() === 'cover');
+    if (meta) coverItem = manifest.get(meta.getAttribute('content'));
+  }
+
+  return { zip, opfDir, spine, manifest, coverItem, title: pick('title'), author: pick('creator') };
+}
+
+const EPUB_DROP = new Set(['SCRIPT', 'STYLE', 'LINK', 'META', 'TITLE', 'IFRAME', 'OBJECT',
+  'EMBED', 'VIDEO', 'AUDIO', 'CANVAS', 'FORM', 'INPUT', 'BUTTON', 'SELECT', 'TEXTAREA', 'NOSCRIPT']);
+const EPUB_KEEP = new Set(['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'EM', 'I', 'STRONG', 'B',
+  'BLOCKQUOTE', 'UL', 'OL', 'LI', 'BR', 'HR', 'FIGURE', 'FIGCAPTION', 'SUP', 'SUB', 'IMG',
+  'TABLE', 'THEAD', 'TBODY', 'TR', 'TD', 'TH', 'SMALL', 'CITE', 'Q']);
+const EPUB_BLOCKISH = /^(P|DIV|H[1-6]|UL|OL|LI|BLOCKQUOTE|TABLE|FIGURE|SECTION|ARTICLE)$/;
+
+// Разметку из книги пропускаем через себя, а не вставляем как есть: чужие
+// скрипты и стили нам не нужны, а вот структура абзацев нужна вся. Отдельная
+// морока — контейнеры: многие книги верстают абзацы не <p>, а <div>. Такой
+// div, внутри которого нет других блоков, и есть абзац — иначе, развернув его,
+// мы склеили бы соседние абзацы в сплошную простыню.
+function sanitizeEpubNode(node, ctx, out) {
+  if (node.nodeType === Node.TEXT_NODE) {
+    out.appendChild(document.createTextNode(node.nodeValue));
+    return;
+  }
+  if (node.nodeType !== Node.ELEMENT_NODE) return;
+  const tag = node.tagName.toUpperCase();
+  if (EPUB_DROP.has(tag)) return;
+
+  let target = out;
+  if (tag === 'IMG') {
+    const src = ctx.images.get(zipResolve(ctx.dir, node.getAttribute('src') || ''));
+    if (src) {
+      const img = document.createElement('img');
+      img.src = src;
+      img.alt = node.getAttribute('alt') || '';
+      out.appendChild(img);
+    }
+    return;
+  }
+  if (EPUB_KEEP.has(tag)) {
+    target = document.createElement(tag.toLowerCase());
+    out.appendChild(target);
+  } else if (EPUB_BLOCKISH.test(tag)) {
+    const hasBlockChild = Array.from(node.children).some(c => EPUB_BLOCKISH.test(c.tagName.toUpperCase()));
+    target = document.createElement(hasBlockChild ? 'div' : 'p');
+    out.appendChild(target);
+  }
+  // Остальное (span, a, и прочая обёртка) разворачиваем: текст остаётся,
+  // лишний узел уходит — так карта символов получается плотнее.
+  node.childNodes.forEach(child => sanitizeEpubNode(child, ctx, target));
+}
+
+async function buildEpubChapter(epub, item, wrap, num, objectUrls) {
+  const path = zipResolve(epub.opfDir, item.href);
+  const file = epub.zip.file(path);
+  if (!file) return false;
+  const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/') + 1) : '';
+  const doc = new DOMParser().parseFromString(await file.async('string'), 'text/html');
+
+  // Картинки лежат в том же zip — вытаскиваем в blob-ссылки заранее, чтобы
+  // sanitizeEpubNode оставался синхронным.
+  const images = new Map();
+  for (const img of Array.from(doc.images)) {
+    const src = img.getAttribute('src');
+    if (!src || /^(https?:|data:)/i.test(src)) continue;
+    const key = zipResolve(dir, src);
+    if (images.has(key)) continue;
+    const entry = epub.zip.file(key);
+    if (!entry) continue;
+    const url = URL.createObjectURL(await entry.async('blob'));
+    objectUrls.push(url);
+    images.set(key, url);
+  }
+
+  const textEl = document.createElement('div');
+  textEl.className = 'textLayer flow-text epub-text';
+  if (doc.body) sanitizeEpubNode(doc.body, { dir, images }, textEl);
+
+  wrap.style.position = 'relative';
+  const hlLayer = document.createElement('div');
+  hlLayer.className = 'highlight-layer';
+  wrap.appendChild(hlLayer);
+  wrap.appendChild(textEl);
+
+  const walker = document.createTreeWalker(textEl, NodeFilter.SHOW_TEXT);
+  let text = '';
+  const nodes = [];
+  let n;
+  while ((n = walker.nextNode())) {
+    nodes.push({ node: n, start: text.length, end: text.length + n.textContent.length });
+    text += n.textContent;
+  }
+  pdfWordMaps.set(textEl, { text, nodes, page: num, hlLayer, wrap, layer: textEl, flow: true });
+  return text.trim().length > 0;
+}
+
+let epubObjectUrls = [];
+async function renderEpub(buf, restore) {
+  const container = document.getElementById('pdfContainer');
+  container.innerHTML = '<div class="flow-loading">Разбираем книгу…</div>';
+  container.style.setProperty('--flow-scale', flowFont / 100);
+
+  epubObjectUrls.forEach(url => URL.revokeObjectURL(url));
+  epubObjectUrls = [];
+
+  const epub = await readEpub(buf);
+  const flowWrap = document.createElement('div');
+  flowWrap.className = 'flow-container';
+  flowWrap.lang = sourceLang; // без языка браузеру нечем расставлять переносы
+  const pageInfos = [];
+  for (let i = 0; i < epub.spine.length; i++) {
+    const wrap = document.createElement('div');
+    wrap.className = 'flow-page';
+    wrap.dataset.page = i + 1;
+    await buildEpubChapter(epub, epub.spine[i], wrap, i + 1, epubObjectUrls);
+    flowWrap.appendChild(wrap);
+    pageInfos.push({ wrap, num: i + 1 });
+  }
+
+  container.innerHTML = '';
+  container.appendChild(flowWrap);
+  currentPages = pageInfos;
+
+  updatePageIndicator();
+  if (currentBookId) idbUpdateBook(currentBookId, { pageCount: pageInfos.length });
+  window.removeEventListener('scroll', onReaderScroll);
+  window.addEventListener('scroll', onReaderScroll);
+
+  const savedPage = (restore && restore.page) || 1;
+  if (restore && restore.scrollPos > 0) {
+    applyReadingPosition(() => window.scrollTo(0, restore.scrollPos));
+  } else {
+    const target = pageInfos[Math.max(1, Math.min(savedPage, pageInfos.length)) - 1];
+    if (target) applyReadingPosition(() => target.wrap.scrollIntoView());
+  }
+}
+
+async function buildEpubMeta(id, buf) {
+  const epub = await readEpub(buf);
+  const patch = { pageCount: epub.spine.length };
+  // В отличие от PDF, у EPUB заголовок в метаданных обычно нормальный — там
+  // это поле заполняет издатель, а не конвертер, и мохибейка в нём не бывает.
+  if (epub.title) patch.title = epub.title;
+  if (epub.author) patch.author = epub.author;
+
+  if (epub.coverItem) {
+    try {
+      const entry = epub.zip.file(zipResolve(epub.opfDir, epub.coverItem.href));
+      if (entry) {
+        const url = URL.createObjectURL(await entry.async('blob'));
+        try {
+          patch.coverDataUrl = await shrinkImageToDataUrl(url, 300);
+          patch.coverIsOwn = true;
+        } finally { URL.revokeObjectURL(url); }
+      }
+    } catch (e) { console.warn('обложка EPUB не прочиталась', e); }
+  }
+
+  await idbUpdateBook(id, patch);
+  if (activeTab === 'view-library') renderLibrary();
+}
+
+// Обложку кладём в IndexedDB, поэтому ужимаем: оригинал в книге бывает в
+// несколько мегабайт, а нужен он размером с ноготь.
+function shrinkImageToDataUrl(url, maxWidth) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxWidth / (img.naturalWidth || maxWidth));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round((img.naturalWidth || maxWidth) * scale);
+      canvas.height = Math.round((img.naturalHeight || maxWidth) * scale);
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL('image/jpeg', 0.72));
+    };
+    img.onerror = () => reject(new Error('обложка не загрузилась'));
+    img.src = url;
+  });
 }
 
 function onReaderScroll() {
@@ -2897,6 +3186,8 @@ function updateReadModeUiForBook() {
   btn.classList.toggle('on', isFlow);
   btn.innerHTML = icon('reading');
   btn.setAttribute('aria-label', isFlow ? 'Вернуться к страницам PDF' : 'Текстовый режим');
+  // У EPUB переключать нечего: страниц-картинок там нет.
+  btn.classList.toggle('hidden', currentKind === 'epub');
   document.getElementById('chromeFontMinus').classList.toggle('hidden', !isFlow);
   document.getElementById('chromeFontPlus').classList.toggle('hidden', !isFlow);
 }
@@ -2970,7 +3261,7 @@ document.getElementById('tpClose').addEventListener('click', closeAllSheets);
 document.getElementById('tpSave').addEventListener('click', handleTpSave);
 document.getElementById('selTranslate').addEventListener('click', translateSelection);
 document.getElementById('addBookBtn').addEventListener('click', pickFile);
-document.getElementById('pdfFileInput').addEventListener('change', e => handlePdfFile(e.target.files[0]));
+document.getElementById('pdfFileInput').addEventListener('change', e => handleBookFile(e.target.files[0]));
 document.getElementById('chromeBack').addEventListener('click', () => showTab(activeTab));
 document.getElementById('chromeBookmark').addEventListener('click', addBookmark);
 document.getElementById('chromeMenu').addEventListener('click', () => currentBookId && openBookSheet(currentBookId));
