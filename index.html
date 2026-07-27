@@ -453,11 +453,11 @@
   </div>
   <div class="chips" id="filterChips"></div>
   <div id="libraryBody"></div>
-  <!-- Книги, присланные в чат бота; наполняется только внутри Telegram -->
+  <!-- Книги из чата бота скачиваются в библиотеку сами; здесь остаются
+       только те, что не удалось скачать автоматически. -->
   <div id="chatBooksWrap" style="display:none">
-    <div class="set-label" style="margin:18px 0 10px">Из чата</div>
+    <div class="set-label" style="margin:18px 0 10px">Не удалось скачать</div>
     <div class="list" id="chatBooksList"></div>
-    <div class="set-hint">Пришли боту PDF в чат — книга появится здесь на всех устройствах.</div>
   </div>
   <input type="file" id="pdfFileInput" accept="application/pdf">
 </div>
@@ -1338,10 +1338,11 @@ function serverFetch(path, opts = {}) {
 const chatDownloading = new Set();
 const chatAutoFailed = new Set(); // авто-скачивание не удалось — не долбить сервер, отдать в ручной список
 
-// Книги из чата скачиваются в библиотеку САМИ. Единственное исключение —
-// книга, которую здесь удалили вручную: без этой метки она воскресала бы
-// после каждого удаления. Такие остаются в разделе «Из чата» — вернуть можно,
-// но осознанным тапом. Метка снимается при повторном скачивании.
+// Книги из чата скачиваются в библиотеку САМИ. Метка нужна только для одного:
+// книгу, которую здесь удалили вручную, не воскрешать при следующем заходе —
+// удаление должно оставаться удалением, без списка «вернуть». Единственный
+// путь получить её обратно — прислать файл боту заново. Метка снимается,
+// если книга всё же снова окажется скачана (сервер выдаст новый chatId).
 const STORAGE_CHAT_TOMB = 'reader_chat_tombstones_v1';
 const chatTombstones = new Set(JSON.parse(localStorage.getItem(STORAGE_CHAT_TOMB) || '[]'));
 function saveChatTombstones() { localStorage.setItem(STORAGE_CHAT_TOMB, JSON.stringify([...chatTombstones])); }
@@ -1377,8 +1378,11 @@ async function loadChatBooks(localBooks) {
   const auto = fresh.filter(b => !chatTombstones.has(b.id) && !chatAutoFailed.has(b.id));
   if (auto.length) autoDownloadChatBooks(auto);
 
-  // В ручном списке — удалённые локально и те, что не скачались сами.
-  const manual = fresh.filter(b => chatTombstones.has(b.id) || chatAutoFailed.has(b.id));
+  // Удалённые здесь вручную (chatTombstones) в список не попадают вообще —
+  // удаление должно выглядеть как удаление, а не как «спрятать и предложить
+  // вернуть». Показываем только то, что не удалось скачать самим: тут нужен
+  // явный «нажми ещё раз», молча повторять бесконечно не стоит.
+  const manual = fresh.filter(b => chatAutoFailed.has(b.id));
   const list = document.getElementById('chatBooksList');
   if (!manual.length) { wrap.style.display = 'none'; list.innerHTML = ''; return; }
 
@@ -1390,8 +1394,7 @@ async function loadChatBooks(localBooks) {
     main.className = 'row-main';
     main.innerHTML = `<div class="row-title"></div><div class="row-sub"></div>`;
     main.querySelector('.row-title').textContent = stripExt(b.name);
-    const hint = chatAutoFailed.has(b.id) ? 'не скачалась — нажми ещё раз' : 'удалена здесь · нажми, чтобы вернуть';
-    main.querySelector('.row-sub').textContent = [fmtSize(b.size), hint].filter(Boolean).join(' · ');
+    main.querySelector('.row-sub').textContent = [fmtSize(b.size), 'не скачалась — нажми ещё раз'].filter(Boolean).join(' · ');
     main.addEventListener('click', () => downloadChatBook(b, row).catch(() => {}));
     const del = document.createElement('button');
     del.className = 'row-del';
