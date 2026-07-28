@@ -151,6 +151,7 @@
   .empty-icon { color: var(--border); margin-bottom: 4px; }
   .empty-icon .icon { width: 48px; height: 48px; }
   .empty-title { font-size: 18px; font-weight: 800; color: var(--text); }
+  .empty-aside { margin-top: 18px; font-size: 13px; line-height: 1.5; color: var(--muted); max-width: 34ch; }
 
   .btn-primary {
     margin-top: 14px; padding: 14px 30px; border: none; border-radius: 14px;
@@ -217,7 +218,9 @@
   #view-pdf { padding: 0; }
   /* Отступы сверху/снизу под шапку и счётчик страниц больше не нужны:
      оба теперь sticky и занимают собственное место в потоке. */
-  #pdfContainer { display: flex; flex-direction: column; padding: 12px 1rem 8px; }
+  /* Нижний отступ — под плавающую таблетку страниц, чтобы она не ложилась
+     на последнюю строку текста. */
+  #pdfContainer { display: flex; flex-direction: column; padding: 12px 1rem 46px; }
   .pdf-page {
     position: relative; margin: 0 auto 14px; background: #fff;
     box-shadow: 0 2px 14px var(--shadow); border-radius: 4px; overflow: hidden;
@@ -267,6 +270,9 @@
      быть видимым и жить в обычном потоке документа, а не быть картой глифов. */
   .flow-container { max-width: 640px; margin: 0 auto; padding: 4px 1.25rem 48px; }
   .flow-page { position: relative; }
+  /* Цель scrollIntoView должна вставать ПОД липкой шапкой, а не под ней
+     прятаться — высоту шапки подставляет setChrome. */
+  .flow-page, .pdf-page { scroll-margin-top: calc(var(--chrome-offset, 58px) + 10px); }
   .flow-loading { padding: 40px 0; text-align: center; color: var(--muted); font-size: 13px; }
   .flow-text {
     position: static; inset: auto; overflow: visible;
@@ -339,6 +345,7 @@
   .nav-item-title { font-size: 14px; line-height: 1.35; }
   .nav-item-sub { font-size: 12px; color: var(--muted); margin-top: 3px; }
   .nav-item-sub b { color: var(--text); font-weight: 700; }
+  .nav-item-here .nav-item-title { color: var(--accent); font-weight: 700; }
   .nav-depth-1 { padding-left: 14px; }
   .nav-depth-2 { padding-left: 28px; }
   .nav-empty { padding: 10px 2px; font-size: 13px; color: var(--muted); }
@@ -434,7 +441,15 @@
   .sheet-grip {
     width: 38px; height: 4px; border-radius: 3px; background: var(--border);
     margin: -4px auto 14px;
+    /* Ручка обещает жест — значит, тянуть за неё должно быть можно: своя
+       область захвата пошире самой полоски и никакой прокрутки под пальцем. */
+    position: relative; touch-action: none; cursor: grab;
   }
+  .sheet-grip::before {
+    content: ''; position: absolute; left: -60px; right: -60px; top: -14px; bottom: -14px;
+  }
+  /* Пока шторку тянут — никаких переходов, иначе она отстаёт от пальца. */
+  .sheet.dragging { transition: none; }
 
   /* перевод */
   .tp-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
@@ -1384,11 +1399,15 @@ async function renderLibrary() {
   if (!books.length) {
     chipsEl.style.display = 'none';
     searchWrap.style.display = 'none';
+    // Про бота говорим прямо здесь: это главный путь пополнения библиотеки
+    // (книга приходит на все устройства сразу), а раньше о нём нельзя было
+    // узнать вообще ниоткуда.
     body.innerHTML = `<div class="empty">
       <div class="empty-icon">${icon('book')}</div>
       <div class="empty-title">Библиотека пуста</div>
       <div>Открой PDF или EPUB — потом можно тапнуть по слову или выделить фразу, чтобы увидеть перевод, а важное отметить маркером.</div>
       <button class="btn-primary" id="emptyAdd">${icon('plus')}Открыть книгу</button>
+      <div class="empty-aside">Ещё книгу можно просто прислать боту в чат — она появится здесь на всех твоих устройствах.</div>
     </div>`;
     document.getElementById('emptyAdd').addEventListener('click', pickFile);
     return;
@@ -2569,6 +2588,14 @@ function watchKeyboard() {
 // пересчитать самим.
 function refreshReaderChrome() {
   if (!readerIsVisible()) return;
+  // Высоту шапки для scroll-margin-top меряем именно здесь: в setChrome при
+  // открытии книги экран ещё не показан и offsetHeight равен нулю, так что
+  // без этого места переменная не проставлялась бы вовсе и оставалось бы
+  // запасное значение — неверное там, где шапка выше из-за «чёлки».
+  const chromeEl = document.getElementById('readerChrome');
+  if (chromeEl.offsetHeight) {
+    document.documentElement.style.setProperty('--chrome-offset', chromeEl.offsetHeight + 'px');
+  }
   updatePageIndicator();
   updateBookmarkButton();
   redrawAllHighlights();
@@ -2692,7 +2719,9 @@ let viewingNote = null; // {nt, book}
 
 function openNoteView(nt, book) {
   viewingNote = { nt, book };
-  document.getElementById('nvQuote').textContent = nt.text;
+  const nvQuote = document.getElementById('nvQuote');
+  nvQuote.textContent = nt.text;
+  nvQuote.style.borderLeftColor = hlHex(nt.color);
   // Аккордеон перевода есть у каждой заметки: если перевода ещё нет
   // (маркер, старая запись), он подгрузится при первом раскрытии.
   const acc = document.getElementById('nvTransAcc');
@@ -2733,9 +2762,27 @@ document.getElementById('nvOpenBook').addEventListener('click', async () => {
   const { nt, book } = viewingNote;
   closeAllSheets();
   await openBook(book.id);
-  const target = currentPages[nt.page - 1];
-  if (target) requestAnimationFrame(() => target.wrap.scrollIntoView({ block: 'center' }));
+  goToNote(nt);
 });
+
+// Переход к самой заметке, а не к началу её страницы. Место известно точно —
+// по нему рисуется маркер; раньше уводило в середину главы, и в длинной главе
+// EPUB это ощущалось как промах. Если карта ещё не построена (постраничный
+// режим рисует страницы лениво), отступаем к переходу по номеру страницы.
+function goToNote(nt) {
+  const info = currentPages[nt.page - 1];
+  if (!info) return;
+  const map = info.map;
+  const offsets = map ? noteOffsets(map, nt) : null;
+  const range = offsets ? rangeFromOffsets(map, offsets[0], offsets[1]) : null;
+  if (!range) { goToPage(nt.page); return; }
+  applyReadingPosition(() => {
+    const rects = range.getClientRects();
+    const top = rects.length ? rects[0].top : 0;
+    window.scrollTo(0, window.scrollY + top - innerHeight * 0.3);
+  });
+  updatePageIndicator();
+}
 document.getElementById('msgOk').addEventListener('click', () => {
   document.getElementById('msgSheet').classList.remove('show');
   // Если под диалогом ничего не осталось — убрать и фон.
@@ -2832,10 +2879,16 @@ function renderTocList() {
     list.innerHTML = '<div class="nav-empty">В этой книге нет оглавления — есть ползунок и поиск.</div>';
     return;
   }
-  currentToc.forEach(item => {
+  // Отмечаем, где читатель сейчас: последний пункт, начавшийся не позже
+  // текущей страницы. Без этого в длинном оглавлении не за что зацепиться.
+  const here = currentPageNumber();
+  let activeIdx = -1;
+  currentToc.forEach((it, i) => { if (it.page <= here) activeIdx = i; });
+  currentToc.forEach((item, i) => {
     const b = document.createElement('button');
     b.type = 'button';
-    b.className = 'nav-item' + (item.depth ? ' nav-depth-' + Math.min(item.depth, 2) : '');
+    b.className = 'nav-item' + (item.depth ? ' nav-depth-' + Math.min(item.depth, 2) : '')
+      + (i === activeIdx ? ' nav-item-here' : '');
     const t = document.createElement('div');
     t.className = 'nav-item-title';
     t.textContent = item.title;
@@ -3248,6 +3301,10 @@ function setChrome(visible) {
   const el = document.getElementById('readerChrome');
   // Запоминаем реальную высоту, чтобы .hidden схлопнул её место в потоке.
   if (el.offsetHeight) el.style.setProperty('--chrome-h', '-' + el.offsetHeight + 'px');
+  // Та же высота нужна прокрутке к странице/главе (scroll-margin-top ниже):
+  // без неё scrollIntoView подводит цель ПОД липкую шапку, и заголовок
+  // главы оказывается срезан — приземляешься не туда, куда тапнула.
+  if (el.offsetHeight) document.documentElement.style.setProperty('--chrome-offset', el.offsetHeight + 'px');
   el.classList.toggle('hidden', !visible);
   document.getElementById('pageIndicator').classList.toggle('hidden', !visible);
 }
@@ -3592,7 +3649,11 @@ document.getElementById('noteQuickDelete').addEventListener('click', async () =>
 
 function openNoteSheet(note) {
   editingNote = note;
-  document.getElementById('noteQuote').textContent = note.text;
+  const quoteEl = document.getElementById('noteQuote');
+  quoteEl.textContent = note.text;
+  // Полоса слева — цветом самого маркера: иначе розовое выделение открывается
+  // карточкой с зелёной полосой, и связь с текстом теряется.
+  quoteEl.style.borderLeftColor = hlHex(note.color);
   document.getElementById('noteInput').value = note.comment || '';
   // Перевод — свёрнутым аккордеоном у каждой заметки: если его ещё нет
   // (маркер без панели перевода, старая запись), подгрузится при раскрытии.
@@ -4192,6 +4253,41 @@ document.getElementById('btnAddHomeScreen').addEventListener('click', () => {
 // ══════════════════════════════════════════════════════════════
 // ШТОРКИ
 // ══════════════════════════════════════════════════════════════
+// ── смахивание шторки вниз ──
+// Ручка сверху рисовалась с самого начала, но жеста за ней не было: тянешь —
+// ничего не происходит, закрыть можно только тапом по фону. Нарисованное
+// обещание должно работать.
+function initSheetDragToClose() {
+  document.querySelectorAll('.sheet').forEach(sheet => {
+    const grip = sheet.querySelector('.sheet-grip');
+    if (!grip) return;
+    let startY = 0, dy = 0, dragging = false;
+
+    grip.addEventListener('pointerdown', e => {
+      dragging = true; startY = e.clientY; dy = 0;
+      sheet.classList.add('dragging');
+      grip.setPointerCapture(e.pointerId);
+    });
+    grip.addEventListener('pointermove', e => {
+      if (!dragging) return;
+      dy = Math.max(0, e.clientY - startY);       // тянуть можно только вниз
+      sheet.style.transform = 'translateY(' + dy + 'px)';
+    });
+    const end = () => {
+      if (!dragging) return;
+      dragging = false;
+      sheet.classList.remove('dragging');
+      sheet.style.transform = '';
+      // Порог — четверть высоты шторки, но не больше 120px: у высокой шторки
+      // иначе пришлось бы тянуть через пол-экрана.
+      const threshold = Math.min(120, sheet.getBoundingClientRect().height * 0.25);
+      if (dy > threshold) closeAllSheets();
+    };
+    grip.addEventListener('pointerup', end);
+    grip.addEventListener('pointercancel', end);
+  });
+}
+
 function openSheet(id) {
   document.querySelectorAll('.sheet').forEach(s => s.classList.toggle('show', s.id === id));
   document.getElementById('backdrop').classList.add('show');
@@ -4306,6 +4402,9 @@ document.getElementById('jumpClose').innerHTML = icon('close', 'icon-sm');
 document.getElementById('chromeMenu').innerHTML = icon('more');
 document.getElementById('chromeToc').innerHTML = icon('toc');
 document.getElementById('tpClose').innerHTML = icon('close', 'icon-sm');
+// Кнопка существовала с первого дня панели, но иконку ей никто не назначал —
+// в панели выделения торчал пустой безымянный огрызок.
+document.getElementById('selCopy').innerHTML = icon('copy');
 applyAppearance();
 watchReaderLayout();
 watchKeyboard();
@@ -4319,6 +4418,7 @@ showTab('view-library');
 resumeLastBook();
 initHomeScreenButton();
 initBackButton();
+initSheetDragToClose();
 mergeWordsFromCloud().catch(() => {});
 </script>
 </body>
