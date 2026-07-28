@@ -502,6 +502,9 @@
   }
   .note-acc-text { flex: 1; min-width: 0; word-break: break-word; }
   .btn-block { display: flex; width: 100%; justify-content: center; margin-bottom: 9px; }
+  /* Действие, а не заглушка: серый .btn-outline читается как выключенная кнопка. */
+  .btn-accent { color: var(--accent); border-color: var(--accent); }
+  .row-act.accent-act { color: var(--accent); }
   .nv-top { display: flex; align-items: center; gap: 2px; margin: -4px 0 10px; }
   .nv-spacer { flex: 1; }
   .nv-comment { font-size: 14px; line-height: 1.5; margin: 0 0 12px; white-space: pre-wrap; }
@@ -750,7 +753,7 @@
   </details>
   <div class="sel-colors" id="noteColors" style="margin-bottom:14px;"></div>
   <textarea class="note-input" id="noteInput" placeholder="Комментарий к выделенному (необязательно)"></textarea>
-  <button class="btn-outline btn-block" id="noteObsidian" type="button"></button>
+  <button class="btn-outline btn-block btn-accent" id="noteObsidian" type="button"></button>
   <button class="btn-wide" id="noteCopy" style="margin-bottom:9px">Скопировать</button>
   <div class="sheet-actions">
     <button class="btn-wide" id="noteDelete"></button>
@@ -763,7 +766,7 @@
 <div class="sheet" id="noteView">
   <div class="sheet-grip"></div>
   <div class="nv-top">
-    <button class="row-act" id="nvObsidian" type="button" aria-label="В Obsidian"></button>
+    <button class="row-act accent-act" id="nvObsidian" type="button" aria-label="В Obsidian"></button>
     <button class="row-act" id="nvCopy" type="button" aria-label="Скопировать"></button>
     <span class="nv-spacer"></span>
     <button class="row-act" id="nvClose" type="button" aria-label="Закрыть"></button>
@@ -2594,7 +2597,11 @@ function noteToMarkdown(nt, book) {
 function showDialog(title, text) {
   document.getElementById('msgTitle').textContent = title;
   document.getElementById('msgText').textContent = text;
-  openSheet('msgSheet');
+  // Не через openSheet: тот закрыл бы открытый попап заметки, и два листа
+  // разъезжались бы навстречу друг другу — выглядит как прыжок интерфейса.
+  // Диалог ложится ПОВЕРХ (он позже в DOM), попап остаётся под ним.
+  document.getElementById('msgSheet').classList.add('show');
+  document.getElementById('backdrop').classList.add('show');
 }
 
 // ── попап заметки (открывается из списка «Заметки») ──
@@ -2603,8 +2610,10 @@ let viewingNote = null; // {nt, book}
 function openNoteView(nt, book) {
   viewingNote = { nt, book };
   document.getElementById('nvQuote').textContent = nt.text;
+  // Аккордеон перевода есть у каждой заметки: если перевода ещё нет
+  // (маркер, старая запись), он подгрузится при первом раскрытии.
   const acc = document.getElementById('nvTransAcc');
-  acc.style.display = nt.translation ? '' : 'none';
+  acc.style.display = '';
   acc.open = false;
   document.getElementById('nvTransText').textContent = nt.translation || '';
   const cm = document.getElementById('nvComment');
@@ -2622,6 +2631,11 @@ function openNoteView(nt, book) {
 }
 
 document.getElementById('nvClose').addEventListener('click', closeAllSheets);
+document.getElementById('nvTransAcc').addEventListener('toggle', () => {
+  const acc = document.getElementById('nvTransAcc');
+  if (!acc.open || !viewingNote) return;
+  lazyTranslateNote(viewingNote.nt, viewingNote.book, document.getElementById('nvTransText'));
+});
 document.getElementById('nvCopy').addEventListener('click', () => {
   if (viewingNote) copyAndTell(noteToText(viewingNote.nt));
 });
@@ -2639,7 +2653,11 @@ document.getElementById('nvOpenBook').addEventListener('click', async () => {
   const target = currentPages[nt.page - 1];
   if (target) requestAnimationFrame(() => target.wrap.scrollIntoView({ block: 'center' }));
 });
-document.getElementById('msgOk').addEventListener('click', closeAllSheets);
+document.getElementById('msgOk').addEventListener('click', () => {
+  document.getElementById('msgSheet').classList.remove('show');
+  // Если под диалогом ничего не осталось — убрать и фон.
+  if (!document.querySelector('.sheet.show')) closeAllSheets();
+});
 
 async function exportNoteToObsidian(nt, book) {
   if (!tg || !tg.initData) {
@@ -3430,10 +3448,10 @@ function openNoteSheet(note) {
   editingNote = note;
   document.getElementById('noteQuote').textContent = note.text;
   document.getElementById('noteInput').value = note.comment || '';
-  // Перевод показываем свёрнутым аккордеоном; у заметок без перевода
-  // (маркер без панели перевода, старые записи) блока просто нет.
+  // Перевод — свёрнутым аккордеоном у каждой заметки: если его ещё нет
+  // (маркер без панели перевода, старая запись), подгрузится при раскрытии.
   const acc = document.getElementById('noteTransAcc');
-  acc.style.display = note.translation ? '' : 'none';
+  acc.style.display = '';
   acc.open = false;
   document.getElementById('noteTransText').textContent = note.translation || '';
   const colors = document.getElementById('noteColors');
@@ -3490,6 +3508,54 @@ async function openPanel(text, showOriginal, selectionInfo) {
   renderLangToggles();
   openSheet('panel');
   await translateText(text);
+}
+
+// Просто перевести строку — без привязки к панели перевода. Нужен заметкам:
+// у старых записей и у поставленных маркером перевода нет, он подгружается,
+// когда аккордеон «Перевод» раскрывают впервые.
+async function fetchTranslation(text, sl, tl) {
+  const key = text.toLowerCase() + '|' + sl + '|' + tl;
+  if (translateCache[key]) return translateCache[key];
+  const url = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=' + sl +
+    '&tl=' + tl + '&dt=t&q=' + encodeURIComponent(text);
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('bad status');
+  const data = await res.json();
+  const translated = data[0].map(x => x[0]).join('');
+  translateCache[key] = translated;
+  saveTranslateCache();
+  return translated;
+}
+
+// Дозагрузка перевода для заметки: перевести, показать и запомнить в самой
+// заметке — чтобы в следующий раз он был на месте и попал в экспорт.
+async function lazyTranslateNote(nt, book, outEl) {
+  if (nt.translation) { outEl.textContent = nt.translation; return; }
+  outEl.textContent = 'Переводим…';
+  try {
+    const sl = SOURCE_LANGS.some(l => l.code === book.sourceLang) ? book.sourceLang : sourceLang;
+    const t = await fetchTranslation(nt.text, sl, targetLang);
+    nt.translation = t;
+    outEl.textContent = t;
+    // Пишем в свежую запись из базы, а не в копию в памяти: список заметок
+    // и открытая книга держат РАЗНЫЕ экземпляры одной записи, и который из
+    // них отстал — заранее не известно. Копию в памяти правим следом.
+    const rec = await idbGetBook(book.id);
+    if (rec) {
+      const stored = (rec.notes || []).find(n => n.id === nt.id);
+      if (stored) {
+        stored.translation = t;
+        await idbUpdateBook(book.id, { notes: rec.notes });
+        scheduleBookSync(rec);
+      }
+    }
+    if (currentBookId === book.id && currentBook) {
+      const inMemory = (currentBook.notes || []).find(n => n.id === nt.id);
+      if (inMemory) inMemory.translation = t;
+    }
+  } catch {
+    outEl.textContent = 'Не удалось перевести — проверь связь и раскрой ещё раз';
+  }
 }
 
 async function translateText(text) {
@@ -4054,6 +4120,11 @@ document.getElementById('noteCopy').addEventListener('click', () => {
     translation: editingNote.translation,
     comment: document.getElementById('noteInput').value,
   }));
+});
+document.getElementById('noteTransAcc').addEventListener('toggle', () => {
+  const acc = document.getElementById('noteTransAcc');
+  if (!acc.open || !editingNote || !currentBook) return;
+  lazyTranslateNote(editingNote, currentBook, document.getElementById('noteTransText'));
 });
 document.getElementById('noteCopyOriginal').addEventListener('click', () => {
   if (editingNote) copyAndTell(editingNote.text);
