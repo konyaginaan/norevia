@@ -2529,12 +2529,12 @@ const noteToText = nt => [nt.text, nt.translation, nt.comment].filter(x => x && 
 function noteToMarkdown(nt, book) {
   const title = book.title || stripExt(book.name);
   const unit = book.kind === 'epub' ? 'гл.' : 'стр.';
-  const parts = ['> ' + String(nt.text || '').trim().replace(/\n/g, '\n> ')];
-  if (nt.translation && nt.translation.trim()) parts.push('**Перевод:** ' + nt.translation.trim());
-  if (nt.comment && nt.comment.trim()) parts.push('**Заметка:** ' + nt.comment.trim());
   const source = ['«' + title + '»', book.author, nt.page ? unit + ' ' + nt.page : '']
     .filter(x => x && String(x).trim()).join(', ');
-  parts.push('---\nИсточник: ' + source);
+  const parts = ['Источник: ' + source];
+  parts.push('> ' + String(nt.text || '').trim().replace(/\n/g, '\n> '));
+  if (nt.translation && nt.translation.trim()) parts.push('**Перевод:** ' + nt.translation.trim());
+  if (nt.comment && nt.comment.trim()) parts.push('**Заметка:** ' + nt.comment.trim());
   return parts.join('\n\n') + '\n';
 }
 
