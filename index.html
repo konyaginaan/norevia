@@ -1339,8 +1339,13 @@ function initBackButton() {
   if (!backButtonAvailable()) return;
   try {
     tg.onEvent('backButtonClicked', () => {
-      // Шаг за шагом, как системный «назад»: сначала закрывается открытая
-      // шторка, потом — книга (возврат в библиотеку).
+      // Шаг за шагом, как системный «назад»: плавающая панель (выделение,
+      // меню маркера) → шторка → книга (возврат в библиотеку).
+      if (document.querySelector('.sel-toolbar.show')) {
+        clearOwnSelection();
+        closeNoteQuickBar();
+        return;
+      }
       if (document.querySelector('.sheet.show')) { closeAllSheets(); return; }
       if (document.getElementById('view-pdf').classList.contains('active')) { showTab(activeTab); return; }
     });
@@ -1870,29 +1875,41 @@ document.getElementById('jumpGo').addEventListener('click', () => {
 });
 document.getElementById('jumpClose').addEventListener('click', hideJumpBar);
 
+// Поколение отрисовки: сборка книги идёт с паузами (см. циклы ниже), и в
+// такую паузу можно успеть открыть другую книгу. Без маркера оба процесса
+// писали бы в один контейнер — получалась бы смесь двух книг на экране.
+// Каждая новая отрисовка перечёркивает предыдущую: устаревшая замечает это
+// на очередном шаге и молча выходит, не трогая DOM.
+let renderSeq = 0;
+
 async function renderPdf(arrayBuffer, restore) {
+  const seq = ++renderSeq;
   const opts = typeof restore === 'number' ? { scrollPos: restore } : (restore || {});
   const doc = await pdfjsLib.getDocument({ data: arrayBuffer.slice(0) }).promise;
+  if (seq !== renderSeq) return;
   currentPdfDoc = doc;
   bookTextIndex = null;
-  buildPdfToc(doc).then(toc => { currentToc = toc; });
+  releaseEpubResources(); // ушли из EPUB — его blob-картинки больше не нужны
+  buildPdfToc(doc).then(toc => { if (seq === renderSeq) currentToc = toc; });
   // Точный пиксель прокрутки годится, только если он записан в том же режиме,
   // в котором открываем: вёрстка страниц и текста между собой не совпадает.
   const exact = opts.posMode === readMode ? (opts.scrollPos || 0) : 0;
   if (readMode === 'flow') {
-    await renderPdfFlow(doc, { page: opts.page || 1, scrollPos: exact });
+    await renderPdfFlow(doc, { page: opts.page || 1, scrollPos: exact }, seq);
   } else {
-    await renderPdfPageMode(doc, { page: opts.page || 1, scrollPos: exact });
+    await renderPdfPageMode(doc, { page: opts.page || 1, scrollPos: exact }, seq);
   }
 }
 
-async function renderPdfPageMode(doc, restore) {
+async function renderPdfPageMode(doc, restore, seq) {
+  if (seq === undefined) seq = ++renderSeq;
   const container = document.getElementById('pdfContainer');
   container.innerHTML = '';
 
   const targetWidth = (Math.min(document.body.clientWidth, 640) - 32) * (zoom / 100);
   const pageInfos = [];
   for (let i = 1; i <= doc.numPages; i++) {
+    if (seq !== renderSeq) return;   // getPage ждёт воркер — окно для другой книги
     const page = await doc.getPage(i);
     const scale = targetWidth / page.getViewport({ scale: 1 }).width;
     const viewport = page.getViewport({ scale });
@@ -1918,6 +1935,7 @@ async function renderPdfPageMode(doc, restore) {
     });
   }, { rootMargin: '1000px 0px' });
   pageInfos.forEach(p => observer.observe(p.wrap));
+  pageModeObserver = observer;
 
   // Есть точный пиксель прокрутки (обычное открытие книги) — используем его;
   // иначе (пришли из текстового режима, там координаты не совпадают) —
@@ -1943,7 +1961,8 @@ async function renderPdfPageMode(doc, restore) {
 // от постраничного режима не откладываем на IntersectionObserver, а строим
 // сразу всю книгу: чтобы прыгнуть на нужную страницу при входе в режим, всё
 // равно пришлось бы дорендерить всё по дороге, так что не усложняем.
-async function renderPdfFlow(doc, restore) {
+async function renderPdfFlow(doc, restore, seq) {
+  if (seq === undefined) seq = ++renderSeq;
   const savedPage = (restore && restore.page) || 1;
   const container = document.getElementById('pdfContainer');
   container.innerHTML = '<div class="flow-loading">Готовим текст…</div>';
@@ -1971,8 +1990,10 @@ async function renderPdfFlow(doc, restore) {
     if (i % 12 === 0 && i < doc.numPages) {
       loadingEl.textContent = 'Готовим текст… ' + Math.round(i / doc.numPages * 100) + '%';
       await new Promise(r => setTimeout(r, 0));
+      if (seq !== renderSeq) return;   // за время паузы открыли другую книгу
     }
   }
+  if (seq !== renderSeq) return;
 
   // Скан вместо текста: в файле нет текстового слоя, извлекать нечего. Раньше
   // такая книга открывалась пустой, а её страницы схлопывались в нулевую
@@ -1987,7 +2008,7 @@ async function renderPdfFlow(doc, restore) {
     if (currentBookId) idbUpdateBook(currentBookId, { noTextLayer: true });
     if (currentBook) currentBook.noTextLayer = true;
     updateReadModeUiForBook();
-    await renderPdfPageMode(doc, { page: savedPage });
+    await renderPdfPageMode(doc, { page: savedPage }, seq);
     showReaderNote('В этой книге нет текстового слоя — только картинки страниц, поэтому открыли её как PDF.');
     return;
   }
@@ -2352,18 +2373,27 @@ async function buildEpubChapter(epub, item, wrap, num, objectUrls) {
 }
 
 let epubObjectUrls = [];
+// Blob-ссылки на картинки глав. Раньше они жили до следующего EPUB — если
+// после EPUB читать PDF, картинки висели в памяти до конца сессии. Теперь
+// отпускаем их при любой смене книги (см. renderPdf и renderEpub).
+function releaseEpubResources() {
+  epubObjectUrls.forEach(url => URL.revokeObjectURL(url));
+  epubObjectUrls = [];
+}
+
 async function renderEpub(buf, restore) {
+  const seq = ++renderSeq;
   const container = document.getElementById('pdfContainer');
   container.innerHTML = '<div class="flow-loading">Разбираем книгу…</div>';
   container.style.setProperty('--flow-scale', flowFont / 100);
 
-  epubObjectUrls.forEach(url => URL.revokeObjectURL(url));
-  epubObjectUrls = [];
+  releaseEpubResources();
+  currentPdfDoc = null;
 
   const epub = await readEpub(buf);
+  if (seq !== renderSeq) return;
   currentToc = epub.toc || [];
   bookTextIndex = null;
-  currentPdfDoc = null;
   const flowWrap = document.createElement('div');
   flowWrap.className = 'flow-container';
   flowWrap.lang = sourceLang; // без языка браузеру нечем расставлять переносы
@@ -2373,6 +2403,7 @@ async function renderEpub(buf, restore) {
     wrap.className = 'flow-page';
     wrap.dataset.page = i + 1;
     const map = await buildEpubChapter(epub, epub.spine[i], wrap, i + 1, epubObjectUrls);
+    if (seq !== renderSeq) return;
     flowWrap.appendChild(wrap);
     pageInfos.push({ wrap, num: i + 1, map });
   }
@@ -2466,6 +2497,7 @@ function onReaderScroll() {
     const patch = { scrollPos: window.scrollY, currentPage: currentPageNumber(), posMode: readMode, posAt: Date.now() };
     idbUpdateBook(currentBookId, patch);
     if (currentBook) { Object.assign(currentBook, patch); scheduleBookSync(currentBook); }
+    sweepFarPages();
   }, 250);
 }
 
@@ -2915,15 +2947,53 @@ function goToMatch(hit) {
   updatePageIndicator();
 }
 
+// ── выгрузка далёких страниц ──
+// Отрисованная страница — это растровая картинка на несколько мегабайт, и
+// раньше они копились без предела: пролистал полсотни страниц — сотни МБ,
+// на телефоне это заканчивается перезапуском вебвью (iOS) или вылетом
+// (Android). Держим отрисованными только окрестность читаемого места;
+// далёкие страницы возвращаем в заглушку и под наблюдение — при возврате
+// к ним они отрисуются заново, место в потоке не меняется (высота задана
+// стилем на обёртке).
+let pageModeObserver = null;
+const PAGES_KEPT_AROUND = 4;
+
+function sweepFarPages() {
+  if (readMode !== 'page' || !pageModeObserver || !currentPages.length) return;
+  const cur = currentPageNumber();
+  currentPages.forEach(info => {
+    if (!info.viewport) return;                       // страница другого режима
+    if (!info.rendered || info.rendering) return;     // не отрисована или ещё рисуется
+    if (Math.abs(info.num - cur) <= PAGES_KEPT_AROUND) return;
+    const canvas = info.wrap.querySelector('canvas');
+    // Обнуление размеров отпускает растровую память сразу, не дожидаясь GC.
+    if (canvas) { canvas.width = 0; canvas.height = 0; }
+    info.wrap.innerHTML = '<div class="pdf-page-loading">Страница ' + info.num + '…</div>';
+    info.map = null;
+    info.rendered = false;
+    pageModeObserver.observe(info.wrap);
+  });
+}
+
 async function renderPdfPage(info) {
   const { page, viewport, wrap } = info;
+  info.rendering = true;
+  try {
   wrap.innerHTML = '';
   // Раньше канвас рисовался в размере CSS-пикселей и растягивался
   // width:100% — на Retina-экране (плотность 2-3×) это давало кратное
   // размытие. Растровую основу рендерим с запасом по плотности экрана,
   // а размер на странице (CSS px) остаётся прежним — его держит .pdf-page
   // canvas { width:100%; height:100% } и style на wrap.
-  const outputScale = window.devicePixelRatio || 1;
+  let outputScale = window.devicePixelRatio || 1;
+  // У WebKit потолок площади канваса ~16.7 млн пикселей: выше — страница
+  // молча остаётся пустой. Достижимо на планшете при плотности 3× и большом
+  // масштабе. Упираемся — снижаем плотность, а не теряем страницу.
+  const CANVAS_PX_LIMIT = 16000000;
+  const basePx = viewport.width * viewport.height;
+  if (basePx * outputScale * outputScale > CANVAS_PX_LIMIT) {
+    outputScale = Math.max(1, Math.sqrt(CANVAS_PX_LIMIT / basePx));
+  }
   const canvas = document.createElement('canvas');
   canvas.width = Math.floor(viewport.width * outputScale);
   canvas.height = Math.floor(viewport.height * outputScale);
@@ -2968,6 +3038,9 @@ async function renderPdfPage(info) {
   pdfWordMaps.set(textLayerDiv, map);
   info.map = map;
   drawHighlights(map);
+  } finally {
+    info.rendering = false;
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
