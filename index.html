@@ -480,6 +480,28 @@
     border-radius: 0 10px 10px 0; padding: 11px 13px; font-size: 14px;
     line-height: 1.5; margin-bottom: 14px; max-height: 130px; overflow-y: auto;
   }
+  .note-quote-row { display: flex; align-items: flex-start; gap: 6px; }
+  .note-quote-row .note-quote { flex: 1; min-width: 0; }
+  /* Перевод — сворачиваемый: обычно читателю нужен оригинал, а перевод
+     раскрывают при необходимости. */
+  .note-acc {
+    border: 1px solid var(--border); border-radius: 12px;
+    margin: 0 0 14px; overflow: hidden;
+  }
+  .note-acc summary {
+    padding: 10px 13px; cursor: pointer; list-style: none;
+    font-size: 13px; font-weight: 700; color: var(--muted);
+    display: flex; align-items: center;
+  }
+  .note-acc summary::-webkit-details-marker { display: none; }
+  .note-acc summary::after { content: '▾'; margin-left: auto; transition: transform 0.15s ease; }
+  .note-acc[open] summary::after { transform: rotate(180deg); }
+  .note-acc-body {
+    padding: 0 13px 11px; font-size: 14px; line-height: 1.5;
+    display: flex; align-items: flex-start; gap: 6px;
+  }
+  .note-acc-text { flex: 1; min-width: 0; word-break: break-word; }
+  .btn-block { display: flex; width: 100%; justify-content: center; margin-bottom: 9px; }
   .note-input {
     width: 100%; min-height: 90px; resize: vertical;
     border: 1px solid var(--border); border-radius: 13px;
@@ -701,9 +723,20 @@
 
 <div class="sheet" id="noteSheet">
   <div class="sheet-grip"></div>
-  <div class="note-quote" id="noteQuote"></div>
+  <div class="note-quote-row">
+    <div class="note-quote" id="noteQuote"></div>
+    <button class="row-act" id="noteCopyOriginal" type="button" aria-label="Скопировать оригинал"></button>
+  </div>
+  <details class="note-acc" id="noteTransAcc">
+    <summary>Перевод</summary>
+    <div class="note-acc-body">
+      <div class="note-acc-text" id="noteTransText"></div>
+      <button class="row-act" id="noteCopyTranslation" type="button" aria-label="Скопировать перевод"></button>
+    </div>
+  </details>
   <div class="sel-colors" id="noteColors" style="margin-bottom:14px;"></div>
   <textarea class="note-input" id="noteInput" placeholder="Комментарий к выделенному (необязательно)"></textarea>
+  <button class="btn-outline btn-block" id="noteObsidian" type="button"></button>
   <button class="btn-wide" id="noteCopy" style="margin-bottom:9px">Скопировать</button>
   <div class="sheet-actions">
     <button class="btn-wide" id="noteDelete"></button>
@@ -770,6 +803,7 @@ const ICONS = {
   want: '<circle cx="12" cy="12" r="8"/><path d="M12 8v4l2.5 2"/>',
   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a1 1 0 0 1 1-1h9"/>',
   toc: '<path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h10"/>',
+  send: '<path d="m3 11.5 18-8-8 18-2.5-7.5L3 11.5Z"/><path d="m10.5 14 10.5-10.5"/>',
 };
 const icon = (name, cls = '') => S(ICONS[name], cls ? ' ' + cls : '');
 
@@ -2484,9 +2518,48 @@ async function copyAndTell(text) {
   return ok;
 }
 
-// Текст заметки для копирования: сам фрагмент, а под ним комментарий —
-// перевод или свой, если он есть. Иначе из буфера выпадала бы половина смысла.
-const noteToText = nt => [nt.text, nt.comment].filter(x => x && x.trim()).join('\n\n');
+// Текст заметки для копирования: фрагмент, перевод, комментарий — всё, что
+// есть. Иначе из буфера выпадала бы половина смысла.
+const noteToText = nt => [nt.text, nt.translation, nt.comment].filter(x => x && x.trim()).join('\n\n');
+
+// ── выгрузка заметки в Obsidian ──
+// Markdown уезжает .md-файлом в чат с ботом (см. /export на сервере) — из
+// чата его одним касанием открывают в Obsidian. Разделы, которых нет
+// (перевод у маркера, пустой комментарий), просто пропускаются.
+function noteToMarkdown(nt, book) {
+  const title = book.title || stripExt(book.name);
+  const unit = book.kind === 'epub' ? 'гл.' : 'стр.';
+  const parts = ['> ' + String(nt.text || '').trim().replace(/\n/g, '\n> ')];
+  if (nt.translation && nt.translation.trim()) parts.push('**Перевод:** ' + nt.translation.trim());
+  if (nt.comment && nt.comment.trim()) parts.push('**Заметка:** ' + nt.comment.trim());
+  const source = ['«' + title + '»', book.author, nt.page ? unit + ' ' + nt.page : '']
+    .filter(x => x && String(x).trim()).join(', ');
+  parts.push('---\nИсточник: ' + source);
+  return parts.join('\n\n') + '\n';
+}
+
+async function exportNoteToObsidian(nt, book) {
+  if (!tg || !tg.initData) {
+    showReaderNote('Отправка в чат работает только внутри Telegram', 2600);
+    return;
+  }
+  const title = book.title || stripExt(book.name);
+  const firstWords = String(nt.text || '').trim().split(/\s+/).slice(0, 5).join(' ');
+  const name = (title + ' — ' + firstWords).slice(0, 70) + '.md';
+  showReaderNote('Отправляю в чат…', 1500);
+  try {
+    const r = await serverFetch('/export?name=' + encodeURIComponent(name), {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/markdown' },
+      body: noteToMarkdown(nt, book),
+    });
+    if (!r.ok) throw new Error('http ' + r.status);
+    showReaderNote('Заметка ушла файлом в чат с ботом — открой её там в Obsidian', 3200);
+  } catch (e) {
+    console.warn('выгрузка заметки не удалась', e);
+    showReaderNote('Не получилось отправить — проверь связь и попробуй ещё раз', 2600);
+  }
+}
 
 // ── переход по книге ──
 function goToPage(num) {
@@ -3253,6 +3326,12 @@ function openNoteSheet(note) {
   editingNote = note;
   document.getElementById('noteQuote').textContent = note.text;
   document.getElementById('noteInput').value = note.comment || '';
+  // Перевод показываем свёрнутым аккордеоном; у заметок без перевода
+  // (маркер без панели перевода, старые записи) блока просто нет.
+  const acc = document.getElementById('noteTransAcc');
+  acc.style.display = note.translation ? '' : 'none';
+  acc.open = false;
+  document.getElementById('noteTransText').textContent = note.translation || '';
   const colors = document.getElementById('noteColors');
   colors.innerHTML = '';
   HL_COLORS.forEach(c => {
@@ -3271,6 +3350,9 @@ function openNoteSheet(note) {
   });
   document.getElementById('noteDelete').innerHTML = icon('trash') + 'Удалить';
   document.getElementById('noteCopy').innerHTML = icon('copy') + 'Скопировать';
+  document.getElementById('noteCopyOriginal').innerHTML = icon('copy', 'icon-sm');
+  document.getElementById('noteCopyTranslation').innerHTML = icon('copy', 'icon-sm');
+  document.getElementById('noteObsidian').innerHTML = icon('send') + 'В Obsidian';
   openSheet('noteSheet');
 }
 
@@ -3370,6 +3452,11 @@ async function saveCurrentNote() {
   if ((currentBook.notes || []).some(n => n.text === currentText)) return;
   const info = panelSelectionInfo;
   const hasOffsets = !!(info && info.map && info.start !== undefined);
+  // Перевод — отдельное поле, а не comment: comment принадлежит читателю
+  // (его собственная запись), и смешивать их значит потерять различие
+  // между «что сказал переводчик» и «что подумала я».
+  const tEl = document.getElementById('tpTranslation');
+  const translation = tEl.classList.contains('loading') || tEl.classList.contains('error') ? '' : tEl.textContent;
   const note = {
     id: newId(),
     page: (info && info.map && info.map.page) || currentPageNumber(),
@@ -3378,7 +3465,8 @@ async function saveCurrentNote() {
     mode: info && info.map ? (info.map.flow ? 'flow' : 'page') : undefined,
     text: currentText,
     color: 'yellow',
-    comment: document.getElementById('tpTranslation').textContent,
+    translation,
+    comment: '',
     createdAt: Date.now(),
   };
   currentBook.notes = (currentBook.notes || []).concat(note);
@@ -3528,6 +3616,24 @@ async function renderNotes() {
     const cm = main.querySelector('.row-note');
     if (nt.comment) cm.textContent = nt.comment; else cm.remove();
     main.querySelector('.bk').textContent = book.title || stripExt(book.name);
+    // Перевод — свёрнутым аккордеоном между цитатой и комментарием. Строка
+    // целиком кликабельна (переход в книгу), поэтому всё внутри аккордеона
+    // глушит всплытие — раскрытие перевода не должно уводить в книгу.
+    if (nt.translation) {
+      const acc = document.createElement('details');
+      acc.className = 'note-acc';
+      acc.innerHTML = '<summary>Перевод</summary><div class="note-acc-body"><div class="note-acc-text"></div></div>';
+      acc.querySelector('.note-acc-text').textContent = nt.translation;
+      const tCopy = document.createElement('button');
+      tCopy.className = 'row-act';
+      tCopy.type = 'button';
+      tCopy.setAttribute('aria-label', 'Скопировать перевод');
+      tCopy.innerHTML = icon('copy', 'icon-sm');
+      tCopy.addEventListener('click', () => copyAndTell(nt.translation));
+      acc.querySelector('.note-acc-body').append(tCopy);
+      acc.addEventListener('click', e => e.stopPropagation());
+      main.querySelector('.row-quote').after(acc);
+    }
     main.addEventListener('click', async () => {
       await openBook(book.id);
       const target = currentPages[nt.page - 1];
@@ -3536,9 +3642,16 @@ async function renderNotes() {
     const copy = document.createElement('button');
     copy.className = 'row-act';
     copy.type = 'button';
-    copy.setAttribute('aria-label', 'Скопировать заметку');
+    copy.setAttribute('aria-label', 'Скопировать оригинал');
     copy.innerHTML = icon('copy', 'icon-sm');
-    copy.addEventListener('click', () => copyAndTell(noteToText(nt)));
+    copy.addEventListener('click', () => copyAndTell(nt.text));
+
+    const toObsidian = document.createElement('button');
+    toObsidian.className = 'row-act';
+    toObsidian.type = 'button';
+    toObsidian.setAttribute('aria-label', 'В Obsidian');
+    toObsidian.innerHTML = icon('send', 'icon-sm');
+    toObsidian.addEventListener('click', () => exportNoteToObsidian(nt, book));
 
     const del = document.createElement('button');
     del.className = 'row-del';
@@ -3553,7 +3666,7 @@ async function renderNotes() {
       if (currentBookId === book.id) { currentBook.notes = rest; redrawAllHighlights(); }
       renderNotes();
     });
-    row.append(main, copy, del);
+    row.append(main, copy, toObsidian, del);
     list.append(row);
   });
   body.append(list);
@@ -3862,8 +3975,19 @@ document.getElementById('noteCopy').addEventListener('click', () => {
   // и ещё не нажать «Сохранить».
   copyAndTell(noteToText({
     text: editingNote.text,
+    translation: editingNote.translation,
     comment: document.getElementById('noteInput').value,
   }));
+});
+document.getElementById('noteCopyOriginal').addEventListener('click', () => {
+  if (editingNote) copyAndTell(editingNote.text);
+});
+document.getElementById('noteCopyTranslation').addEventListener('click', () => {
+  if (editingNote) copyAndTell(editingNote.translation || '');
+});
+document.getElementById('noteObsidian').addEventListener('click', () => {
+  if (!editingNote || !currentBook) return;
+  exportNoteToObsidian({ ...editingNote, comment: document.getElementById('noteInput').value }, currentBook);
 });
 document.getElementById('noteDelete').addEventListener('click', async () => {
   if (!editingNote) return;
