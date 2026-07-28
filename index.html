@@ -502,6 +502,20 @@
   }
   .note-acc-text { flex: 1; min-width: 0; word-break: break-word; }
   .btn-block { display: flex; width: 100%; justify-content: center; margin-bottom: 9px; }
+  .nv-top { display: flex; align-items: center; gap: 2px; margin: -4px 0 10px; }
+  .nv-spacer { flex: 1; }
+  .nv-comment { font-size: 14px; line-height: 1.5; margin: 0 0 12px; white-space: pre-wrap; }
+  .nv-meta { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+  .msg-title { font-size: 17px; font-weight: 800; margin-bottom: 8px; }
+  .msg-text { font-size: 14px; line-height: 1.55; margin-bottom: 16px; }
+  .hl-dot {
+    display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+    margin-right: 7px; vertical-align: baseline;
+  }
+  .note-row-title {
+    font-weight: 700; font-size: 15px; line-height: 1.4; word-break: break-word;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
   .note-input {
     width: 100%; min-height: 90px; resize: vertical;
     border: 1px solid var(--border); border-radius: 13px;
@@ -742,6 +756,38 @@
     <button class="btn-wide" id="noteDelete"></button>
     <button class="btn-wide done" id="noteSave">Сохранить</button>
   </div>
+</div>
+
+<!-- Просмотр заметки из списка: сверху действия, ниже — оригинал,
+     перевод аккордеоном, комментарий. Открывается тапом по заметке. -->
+<div class="sheet" id="noteView">
+  <div class="sheet-grip"></div>
+  <div class="nv-top">
+    <button class="row-act" id="nvObsidian" type="button" aria-label="В Obsidian"></button>
+    <button class="row-act" id="nvCopy" type="button" aria-label="Скопировать"></button>
+    <span class="nv-spacer"></span>
+    <button class="row-act" id="nvClose" type="button" aria-label="Закрыть"></button>
+  </div>
+  <div class="note-quote" id="nvQuote"></div>
+  <details class="note-acc" id="nvTransAcc">
+    <summary>Перевод</summary>
+    <div class="note-acc-body">
+      <div class="note-acc-text" id="nvTransText"></div>
+      <button class="row-act" id="nvTransCopy" type="button" aria-label="Скопировать перевод"></button>
+    </div>
+  </details>
+  <div class="nv-comment" id="nvComment"></div>
+  <div class="nv-meta" id="nvMeta"></div>
+  <button class="btn-outline btn-block" id="nvOpenBook" type="button">Открыть в книге</button>
+</div>
+
+<!-- Всплывающее сообщение с кнопкой — для случаев, где мимолётной плашки
+     мало и человек должен успеть прочитать, что произошло. -->
+<div class="sheet" id="msgSheet">
+  <div class="sheet-grip"></div>
+  <div class="msg-title" id="msgTitle"></div>
+  <div class="msg-text" id="msgText"></div>
+  <button class="btn-wide done" id="msgOk" type="button">Понятно</button>
 </div>
 
 <div class="reader-note" id="readerNote"></div>
@@ -2391,6 +2437,11 @@ function watchReaderLayout() {
   let t = null;
   readerLayoutWatcher = new ResizeObserver(() => {
     clearTimeout(t);
+    // Прямоугольники маркеров прибиты к пикселям на момент отрисовки, а
+    // текст в текстовом режиме перевёрстывается и позже: досчитываются
+    // переносы, подгружаются картинки EPUB, меняется кегль. Без
+    // перерисовки (внутри refreshReaderChrome) подсветка съезжает на чужие
+    // строки — и выглядит так, будто сохранённое выделение просто пропало.
     t = setTimeout(refreshReaderChrome, 120);
   });
   readerLayoutWatcher.observe(document.getElementById('pdfContainer'));
@@ -2435,6 +2486,7 @@ function refreshReaderChrome() {
   if (!readerIsVisible()) return;
   updatePageIndicator();
   updateBookmarkButton();
+  redrawAllHighlights();
 }
 
 function currentPageNumber() {
@@ -2538,6 +2590,57 @@ function noteToMarkdown(nt, book) {
   return parts.join('\n\n') + '\n';
 }
 
+// ── всплывающее сообщение с кнопкой ──
+function showDialog(title, text) {
+  document.getElementById('msgTitle').textContent = title;
+  document.getElementById('msgText').textContent = text;
+  openSheet('msgSheet');
+}
+
+// ── попап заметки (открывается из списка «Заметки») ──
+let viewingNote = null; // {nt, book}
+
+function openNoteView(nt, book) {
+  viewingNote = { nt, book };
+  document.getElementById('nvQuote').textContent = nt.text;
+  const acc = document.getElementById('nvTransAcc');
+  acc.style.display = nt.translation ? '' : 'none';
+  acc.open = false;
+  document.getElementById('nvTransText').textContent = nt.translation || '';
+  const cm = document.getElementById('nvComment');
+  cm.textContent = nt.comment || '';
+  cm.style.display = nt.comment ? '' : 'none';
+  const unit = book.kind === 'epub' ? 'гл.' : 'стр.';
+  document.getElementById('nvMeta').textContent =
+    [[book.title || stripExt(book.name), book.author].filter(Boolean).join(' · '), unit + ' ' + nt.page, fmtDate(nt.createdAt)]
+      .filter(Boolean).join(' · ');
+  document.getElementById('nvObsidian').innerHTML = icon('send', 'icon-sm');
+  document.getElementById('nvCopy').innerHTML = icon('copy', 'icon-sm');
+  document.getElementById('nvClose').innerHTML = icon('close', 'icon-sm');
+  document.getElementById('nvTransCopy').innerHTML = icon('copy', 'icon-sm');
+  openSheet('noteView');
+}
+
+document.getElementById('nvClose').addEventListener('click', closeAllSheets);
+document.getElementById('nvCopy').addEventListener('click', () => {
+  if (viewingNote) copyAndTell(noteToText(viewingNote.nt));
+});
+document.getElementById('nvTransCopy').addEventListener('click', () => {
+  if (viewingNote) copyAndTell(viewingNote.nt.translation || '');
+});
+document.getElementById('nvObsidian').addEventListener('click', () => {
+  if (viewingNote) exportNoteToObsidian(viewingNote.nt, viewingNote.book);
+});
+document.getElementById('nvOpenBook').addEventListener('click', async () => {
+  if (!viewingNote) return;
+  const { nt, book } = viewingNote;
+  closeAllSheets();
+  await openBook(book.id);
+  const target = currentPages[nt.page - 1];
+  if (target) requestAnimationFrame(() => target.wrap.scrollIntoView({ block: 'center' }));
+});
+document.getElementById('msgOk').addEventListener('click', closeAllSheets);
+
 async function exportNoteToObsidian(nt, book) {
   if (!tg || !tg.initData) {
     showReaderNote('Отправка в чат работает только внутри Telegram', 2600);
@@ -2554,7 +2657,8 @@ async function exportNoteToObsidian(nt, book) {
       body: noteToMarkdown(nt, book),
     });
     if (!r.ok) throw new Error('http ' + r.status);
-    showReaderNote('Заметка ушла файлом в чат с ботом — открой её там в Obsidian', 3200);
+    showDialog('Заметка отправлена',
+      'Файл ' + name + ' уже в твоём чате с ботом @Norevia_bot. Открой чат — файл можно открыть в Obsidian или переслать куда нужно.');
   } catch (e) {
     console.warn('выгрузка заметки не удалась', e);
     showReaderNote('Не получилось отправить — проверь связь и попробуй ещё раз', 2600);
@@ -3608,50 +3712,16 @@ async function renderNotes() {
     row.className = 'row';
     const main = document.createElement('div');
     main.className = 'row-main';
+    // Заголовок — сами первые слова заметки (обрезает CSS-клэмп), мелкой
+    // строкой — книга и автор. Всё остальное живёт в попапе по тапу:
+    // так список остаётся пробегаемым глазами, а не простынёй цитат.
     main.innerHTML = `
-      <div class="row-quote" style="border-color:${hlHex(nt.color)}"></div>
-      <div class="row-note"></div>
-      <div class="row-sub"><span class="bk"></span> · стр. ${nt.page} · ${fmtDate(nt.createdAt)}</div>`;
-    main.querySelector('.row-quote').textContent = nt.text;
-    const cm = main.querySelector('.row-note');
-    if (nt.comment) cm.textContent = nt.comment; else cm.remove();
-    main.querySelector('.bk').textContent = book.title || stripExt(book.name);
-    // Перевод — свёрнутым аккордеоном между цитатой и комментарием. Строка
-    // целиком кликабельна (переход в книгу), поэтому всё внутри аккордеона
-    // глушит всплытие — раскрытие перевода не должно уводить в книгу.
-    if (nt.translation) {
-      const acc = document.createElement('details');
-      acc.className = 'note-acc';
-      acc.innerHTML = '<summary>Перевод</summary><div class="note-acc-body"><div class="note-acc-text"></div></div>';
-      acc.querySelector('.note-acc-text').textContent = nt.translation;
-      const tCopy = document.createElement('button');
-      tCopy.className = 'row-act';
-      tCopy.type = 'button';
-      tCopy.setAttribute('aria-label', 'Скопировать перевод');
-      tCopy.innerHTML = icon('copy', 'icon-sm');
-      tCopy.addEventListener('click', () => copyAndTell(nt.translation));
-      acc.querySelector('.note-acc-body').append(tCopy);
-      acc.addEventListener('click', e => e.stopPropagation());
-      main.querySelector('.row-quote').after(acc);
-    }
-    main.addEventListener('click', async () => {
-      await openBook(book.id);
-      const target = currentPages[nt.page - 1];
-      if (target) requestAnimationFrame(() => target.wrap.scrollIntoView({ block: 'center' }));
-    });
-    const copy = document.createElement('button');
-    copy.className = 'row-act';
-    copy.type = 'button';
-    copy.setAttribute('aria-label', 'Скопировать оригинал');
-    copy.innerHTML = icon('copy', 'icon-sm');
-    copy.addEventListener('click', () => copyAndTell(nt.text));
-
-    const toObsidian = document.createElement('button');
-    toObsidian.className = 'row-act';
-    toObsidian.type = 'button';
-    toObsidian.setAttribute('aria-label', 'В Obsidian');
-    toObsidian.innerHTML = icon('send', 'icon-sm');
-    toObsidian.addEventListener('click', () => exportNoteToObsidian(nt, book));
+      <div class="note-row-title"><span class="hl-dot" style="background:${hlHex(nt.color)}"></span><span class="t"></span></div>
+      <div class="row-sub"><span class="bk"></span></div>`;
+    main.querySelector('.t').textContent = nt.text;
+    main.querySelector('.bk').textContent =
+      [book.title || stripExt(book.name), book.author].filter(Boolean).join(' · ');
+    main.addEventListener('click', () => openNoteView(nt, book));
 
     const del = document.createElement('button');
     del.className = 'row-del';
@@ -3666,7 +3736,7 @@ async function renderNotes() {
       if (currentBookId === book.id) { currentBook.notes = rest; redrawAllHighlights(); }
       renderNotes();
     });
-    row.append(main, copy, toObsidian, del);
+    row.append(main, del);
     list.append(row);
   });
   body.append(list);
@@ -3814,6 +3884,12 @@ function setFlowFont(next) {
   flowFont = Math.max(70, Math.min(200, next));
   localStorage.setItem(STORAGE_FLOW_FONT, String(flowFont));
   document.getElementById('pdfContainer').style.setProperty('--flow-scale', flowFont / 100);
+  // Новый кегль перевёрстывает текст, а прямоугольники маркеров посчитаны в
+  // пикселях старой вёрстки — без пересчёта они остаются на чужих строках.
+  // ResizeObserver (watchReaderLayout) делает то же самое, но полагаться
+  // только на него нельзя: в скрытом вебвью его вызовы не приходят.
+  clearTimeout(setFlowFont._t);
+  setFlowFont._t = setTimeout(redrawAllHighlights, 80);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -4014,6 +4090,10 @@ document.getElementById('tpClose').innerHTML = icon('close', 'icon-sm');
 applyAppearance();
 watchReaderLayout();
 watchKeyboard();
+window.addEventListener('resize', () => {
+  clearTimeout(window.__hlResizeT);
+  window.__hlResizeT = setTimeout(redrawAllHighlights, 150);
+});
 renderSelColors();
 renderTabbar();
 showTab('view-library');
