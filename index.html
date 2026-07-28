@@ -200,7 +200,10 @@
     background: color-mix(in srgb, var(--surface) 92%, transparent);
     backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
     border-top: 1px solid var(--border);
-    padding-bottom: env(safe-area-inset-bottom, 0px);
+    /* env() заполняет отступ только на iOS; Telegram на Android передаёт
+       свой через --tg-safe-area-inset-bottom (Bot API 8.0) — берём больший.
+       Там, где не задано ни то ни другое, оба слагаемых нули. */
+    padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px));
   }
   .tabbar.show { display: flex; }
   .tab {
@@ -277,6 +280,10 @@
   /* Главы не должны стыковаться вплотную — иначе конец одной читается как
      продолжение следующей. */
   .flow-page + .flow-page { margin-top: 1.6em; }
+  /* У Chromium (Android) нет словарей переносов для греческого: выключка по
+     ширине без переносов растягивает строки дырами между словами. Ровный
+     левый край там читается лучше. На iOS переносы есть — оставляем как было. */
+  .plat-android .flow-text { text-align: left; }
   .flow-text p { margin: 0 0 1em; }
   .flow-text span, .flow-text br {
     color: inherit; position: static; white-space: normal; cursor: text;
@@ -305,7 +312,7 @@
      слоя») — само уезжает, ничего не загораживает надолго. */
   .reader-note {
     position: fixed; left: 50%; transform: translateX(-50%) translateY(12px);
-    bottom: calc(env(safe-area-inset-bottom, 0px) + 62px); z-index: 46;
+    bottom: calc(max(env(safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px)) + 62px); z-index: 46;
     max-width: min(88vw, 420px);
     background: var(--surface); border: 1px solid var(--border);
     box-shadow: 0 6px 20px var(--shadow); border-radius: 14px;
@@ -416,7 +423,7 @@
     background: var(--surface);
     border-radius: 22px 22px 0 0;
     box-shadow: 0 -4px 26px var(--shadow);
-    padding: 1.15rem 1.15rem calc(env(safe-area-inset-bottom, 0px) + 1.15rem);
+    padding: 1.15rem 1.15rem calc(max(env(safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px)) + 1.15rem);
     overflow-y: auto;
     max-height: 78vh;
     max-height: min(78vh, calc(100vh - var(--kb, 0px) - 40px));
@@ -821,6 +828,9 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dis
 // продолжает работать как обычный сайт. Методы WebApp, которых нет в клиенте,
 // не «молча ничего не делают», а бросают исключение, поэтому каждый — в try/catch.
 const tg = window.Telegram?.WebApp;
+// Возможности движков различаются (переносы, жесты) — помечаем платформу
+// классом, чтобы CSS мог подстроиться. Функциональность от этого не зависит.
+if (/android/i.test(navigator.userAgent)) document.documentElement.classList.add('plat-android');
 if (tg) {
   try { tg.ready(); tg.expand(); } catch (e) { console.warn('WebApp init failed', e); }
   // Иначе свайп вниз по странице книги закрывает мини-приложение вместо скролла.
@@ -1304,6 +1314,37 @@ function showScreen(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.toggle('active', s.id === id));
   document.getElementById('tabbar').classList.toggle('show', id !== 'view-pdf');
   window.scrollTo(0, 0);
+  updateBackButton();
+}
+
+// ── кнопка «назад» Telegram ──
+// Без неё системный жест «назад» на Android закрывает мини-приложение
+// целиком — вместо возврата из книги в библиотеку или закрытия шторки.
+// Telegram даёт свою кнопку в шапке (Bot API 6.1+): показываем её, когда
+// есть куда возвращаться, и обрабатываем шаг назад сами. На iOS она тоже
+// появляется — поведение одинаковое на обеих платформах.
+function backButtonAvailable() {
+  try { return !!(tg && tg.BackButton && tg.isVersionAtLeast && tg.isVersionAtLeast('6.1')); }
+  catch { return false; }
+}
+
+function updateBackButton() {
+  if (!backButtonAvailable()) return;
+  const somethingToClose = !!document.querySelector('.sheet.show')
+    || document.getElementById('view-pdf').classList.contains('active');
+  try { somethingToClose ? tg.BackButton.show() : tg.BackButton.hide(); } catch {}
+}
+
+function initBackButton() {
+  if (!backButtonAvailable()) return;
+  try {
+    tg.onEvent('backButtonClicked', () => {
+      // Шаг за шагом, как системный «назад»: сначала закрывается открытая
+      // шторка, потом — книга (возврат в библиотеку).
+      if (document.querySelector('.sheet.show')) { closeAllSheets(); return; }
+      if (document.getElementById('view-pdf').classList.contains('active')) { showTab(activeTab); return; }
+    });
+  } catch (e) { console.warn('BackButton недоступен', e); }
 }
 
 async function showTab(id) {
@@ -1906,6 +1947,7 @@ async function renderPdfFlow(doc, restore) {
   const savedPage = (restore && restore.page) || 1;
   const container = document.getElementById('pdfContainer');
   container.innerHTML = '<div class="flow-loading">Готовим текст…</div>';
+  const loadingEl = container.firstElementChild;
   container.style.setProperty('--flow-scale', flowFont / 100);
 
   const flowWrap = document.createElement('div');
@@ -1922,6 +1964,14 @@ async function renderPdfFlow(doc, restore) {
     if (map) pagesWithText++;
     flowWrap.appendChild(wrap);
     pageInfos.push({ wrap, num: i, map });
+    // На толстой книге цикл занимает секунды, а на слабом телефоне — десятки:
+    // без передышек главный поток занят целиком и приложение выглядит
+    // зависшим. Каждые несколько страниц отдаём кадр браузеру и показываем,
+    // сколько уже готово.
+    if (i % 12 === 0 && i < doc.numPages) {
+      loadingEl.textContent = 'Готовим текст… ' + Math.round(i / doc.numPages * 100) + '%';
+      await new Promise(r => setTimeout(r, 0));
+    }
   }
 
   // Скан вместо текста: в файле нет текстового слоя, извлекать нечего. Раньше
@@ -2602,6 +2652,7 @@ function showDialog(title, text) {
   // Диалог ложится ПОВЕРХ (он позже в DOM), попап остаётся под ним.
   document.getElementById('msgSheet').classList.add('show');
   document.getElementById('backdrop').classList.add('show');
+  updateBackButton();
 }
 
 // ── попап заметки (открывается из списка «Заметки») ──
@@ -2657,6 +2708,7 @@ document.getElementById('msgOk').addEventListener('click', () => {
   document.getElementById('msgSheet').classList.remove('show');
   // Если под диалогом ничего не осталось — убрать и фон.
   if (!document.querySelector('.sheet.show')) closeAllSheets();
+  updateBackButton();
 });
 
 async function exportNoteToObsidian(nt, book) {
@@ -3322,7 +3374,28 @@ function finishPointer() {
   if (pendingSelection) positionSelToolbar();
 }
 pdfContainerEl.addEventListener('pointerup', finishPointer);
-pdfContainerEl.addEventListener('pointercancel', () => { cancelLongPress(); selecting = false; lpAnchor = null; });
+// pointercancel — это «жест забрал себе браузер» (на Android так делает
+// нативное выделение и системные жесты). Раньше мы тут просто сбрасывали
+// флаги — и уже растянутое выделение застывало на странице без панели,
+// мёртвым. Если выделение шло, завершаем его как обычное отпускание пальца:
+// панель с «Перевести» и цветами появляется, выделение остаётся рабочим.
+pdfContainerEl.addEventListener('pointercancel', () => {
+  if (selecting) finishPointer();
+  else cancelLongPress();
+});
+
+// Нативное выделение соревновалось бы с нашим: на Android долгий тап
+// запускает системные «синие маркеры» и контекстное меню, и жест уходит им.
+// selectstart глушит само зарождение нативного выделения (каретка от этого
+// не страдает — user-select остаётся text и caretPositionFromPoint работает),
+// contextmenu — меню долгого тапа. Оба — только внутри текста книги.
+document.addEventListener('selectstart', e => {
+  const el = e.target && (e.target.nodeType === Node.TEXT_NODE ? e.target.parentElement : e.target);
+  if (el && el.closest && el.closest('.textLayer')) e.preventDefault();
+});
+document.addEventListener('contextmenu', e => {
+  if (e.target && e.target.closest && e.target.closest('.textLayer')) e.preventDefault();
+});
 
 // Пока тянут выделение, страница не должна ехать под пальцем. touch-action
 // на контейнере не подходит — он отнял бы обычный скролл целиком.
@@ -4049,12 +4122,14 @@ document.getElementById('btnAddHomeScreen').addEventListener('click', () => {
 function openSheet(id) {
   document.querySelectorAll('.sheet').forEach(s => s.classList.toggle('show', s.id === id));
   document.getElementById('backdrop').classList.add('show');
+  updateBackButton();
 }
 function closeAllSheets() {
   document.querySelectorAll('.sheet').forEach(s => s.classList.remove('show'));
   document.getElementById('backdrop').classList.remove('show');
   closeNoteQuickBar();
   clearSelectionPreview();
+  updateBackButton();
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -4170,6 +4245,7 @@ renderTabbar();
 showTab('view-library');
 resumeLastBook();
 initHomeScreenButton();
+initBackButton();
 mergeWordsFromCloud().catch(() => {});
 </script>
 </body>
