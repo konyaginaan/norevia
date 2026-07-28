@@ -3741,9 +3741,15 @@ function initHomeScreenButton() {
   hint.textContent = ADD_HINT;
   try {
     tg.checkHomeScreenStatus(status => {
+      // «added» — это лишь то, что Telegram считает ярлык добавленным. На
+      // Android иконка при этом запросто может не появиться: часть оболочек
+      // кладёт ярлык в список приложений или на другую страницу экрана, а
+      // системное окно подтверждения легко пропустить. Поэтому кнопку здесь
+      // НЕ отключаем — иначе человек остаётся без иконки и без возможности
+      // повторить (а раньше блок в этом случае и вовсе исчезал).
       if (status === 'added') {
-        btn.innerHTML = icon('check') + 'Уже на домашнем экране';
-        btn.disabled = true;
+        btn.innerHTML = icon('plus') + 'Добавить ещё раз';
+        hint.textContent = HOME_SCREEN_ADDED_HINT;
       } else if (status === 'unsupported') {
         // Клиент новый, но оболочка телефона ярлыки не поддерживает.
         btn.disabled = true;
@@ -3752,15 +3758,26 @@ function initHomeScreenButton() {
       }
     });
     tg.onEvent('homeScreenAdded', () => {
-      btn.innerHTML = icon('check') + 'Добавлено на домашний экран';
-      btn.disabled = true;
+      btn.innerHTML = icon('check') + 'Добавлено';
+      hint.textContent = HOME_SCREEN_ADDED_HINT;
     });
   } catch (e) { console.warn('checkHomeScreenStatus недоступен', e); }
 }
 
+// Общий «куда смотреть» — он одинаково нужен и когда ярлык только что
+// попросили добавить, и когда Telegram считает его уже добавленным.
+const WHERE_TO_LOOK = 'Иконки не видно? Посмотри на других страницах домашнего экрана и в списке всех приложений — на Android ярлык часто попадает туда. Можно нажать ещё раз или добавить через меню «⋮» в шапке Telegram.';
+const HOME_SCREEN_ADDED_HINT = 'Telegram считает, что ярлык уже добавлен. ' + WHERE_TO_LOOK;
+const HOME_SCREEN_CLICKED_HINT = 'Если появилось системное окно — подтверди добавление. ' + WHERE_TO_LOOK;
+
 document.getElementById('btnAddHomeScreen').addEventListener('click', () => {
   if (!tg) return;
   try { tg.addToHomeScreen(); } catch (e) { console.warn('addToHomeScreen не сработал', e); }
+  // Подтверждения может не быть вовсе: сообщение о добавлении приходит не от
+  // всех оболочек. Подсказываем, куда смотреть, не дожидаясь события.
+  setTimeout(() => {
+    document.getElementById('homeScreenHint').textContent = HOME_SCREEN_CLICKED_HINT;
+  }, 800);
 });
 
 // ══════════════════════════════════════════════════════════════
