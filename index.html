@@ -1231,17 +1231,22 @@ const WORD_CHAR_RE = /[\p{L}\p{M}]/u;
 // ══════════════════════════════════════════════════════════════
 // ОБЛОЖКИ-ЗАГЛУШКИ (SVG-шаблоны: текст названия ложится прямо в рисунок)
 // ══════════════════════════════════════════════════════════════
-const COVER_TEMPLATES = [
-  { bg: '#DFCFB4', ink: '#8A7550', txt: '#5C4B30', art: `<path d="M150 62c-30 0-52 24-52 54 0 18 9 27 9 39 0 9-6 12-6 20h20" stroke="#8A7550" stroke-width="1.6" fill="none"/><path d="M150 62c26 0 44 20 44 46 0 30-22 52-44 60" stroke="#8A7550" stroke-width="1.6" fill="none"/><path d="M143 100v56" stroke="#8A7550" stroke-width="1.4"/><path d="M143 112c-11-3-16-11-15-19 9-1 15 6 15 19Zm0 16c11-3 16-11 15-19-9-1-15 6-15 19Zm0 16c-11-3-16-11-15-19 9-1 15 6 15 19Z" fill="none" stroke="#8A7550" stroke-width="1.4"/>` },
-  { bg: '#4A5D42', ink: '#DCE5D2', txt: '#EAF0E2', art: `<rect width="300" height="250" fill="#9BB08C"/><circle cx="196" cy="96" r="26" fill="#E8EEDF"/><path d="M0 168c48-30 92 8 140-14s110 4 160-16v112H0Z" fill="#6E8560"/><path d="M0 210c54-26 96 6 150-12s100 6 150-10v62H0Z" fill="#4A5D42"/><path d="M132 250c14-24 4-38 16-56" stroke="#DCE5D2" stroke-width="3" fill="none"/>` },
-  { bg: '#EFEAE0', ink: '#B8AE9B', txt: '#5F5849', art: `<path d="M112 176V112a38 38 0 0 1 76 0v64Z" fill="#E2DACB"/><path d="M150 168v-44" stroke="#A79C86" stroke-width="1.5"/><path d="M150 138c-12-3-17-12-16-21 10-1 16 7 16 21Zm0 14c12-3 17-12 16-21-10-1-16 7-16 21Z" fill="none" stroke="#A79C86" stroke-width="1.5"/><path d="M150 176h44v12h-44Zm14-14h30v12h-30Z" fill="#D6CCB8"/>` },
-  { bg: '#9C8CA8', ink: '#E4DCEA', txt: '#F1ECF5', art: `<circle cx="126" cy="112" r="34" stroke="#E4DCEA" stroke-width="1.6" fill="none"/><circle cx="150" cy="146" r="22" stroke="#E4DCEA" stroke-width="1.6" fill="none"/><path d="M186 178V106" stroke="#6E5F7C" stroke-width="2"/><path d="M186 116c-9-4-12-13-10-20 8 0 12 9 10 20Zm0 18c9-4 12-13 10-20-8 0-12 9-10 20Zm0 18c-9-4-12-13-10-20 8 0 12 9 10 20Z" fill="#6E5F7C"/>` },
-  { bg: '#1E2635', ink: '#C6CEDC', txt: '#E4E9F1', art: `<path d="M196 74a26 26 0 1 0 22 30 20 20 0 0 1-22-30Z" fill="#E9EDF4"/><g fill="#D3DAE6"><circle cx="86" cy="72" r="1.6"/><circle cx="118" cy="98" r="1.2"/><circle cx="72" cy="120" r="1.4"/><circle cx="148" cy="66" r="1.2"/><circle cx="228" cy="140" r="1.4"/><circle cx="102" cy="150" r="1.2"/><circle cx="252" cy="92" r="1.2"/></g><path d="M0 198c56-34 100 6 152-16s96 8 148-10v78H0Z" fill="#33405A"/><path d="M0 232c60-24 104 8 152-8s96 4 148-8v34H0Z" fill="#222C3E"/>` },
-  { bg: '#B0A3C6', ink: '#E8E2F0', txt: '#F2EEF7', art: `<g stroke="#5E5470" stroke-width="1.8" fill="none"><path d="M122 96c4-5 8-5 12 0m0 0c4-5 8-5 12 0"/><path d="M148 78c3-4 7-4 10 0m0 0c3-4 7-4 10 0"/><path d="M164 108c3-4 7-4 10 0m0 0c3-4 7-4 10 0"/></g><g stroke="#9A8CB2" stroke-width="2" fill="none"><path d="M0 176c60-22 110 22 170 2s90-14 130-24"/><path d="M0 196c60-22 110 22 170 2s90-14 130-24"/><path d="M0 216c60-22 110 22 170 2s90-14 130-24"/></g>` },
-  { bg: '#F1EDE3', ink: '#BDB5A2', txt: '#5B5445', art: `<circle cx="150" cy="150" r="42" fill="#DFE3CE"/><g stroke="#A79E88" stroke-width="1.4" fill="none"><path d="M120 190v-56m0 0-12-12m12 12 12-12m-12 12-16 2m16-2 16 2"/><path d="M150 196v-70m0 0-13-13m13 13 13-13m-13 13-17 3m17-3 17 3"/><path d="M180 190v-58m0 0-12-12m12 12 12-12m-12 12-16 2m16-2 16 2"/></g>` },
-  { bg: '#3E5240', ink: '#CBD8C4', txt: '#E4EDDF', art: `<path d="M112 178V116a38 38 0 0 1 76 0v62Z" fill="#7E9478"/><path d="M112 178V116a38 38 0 0 1 76 0v62Z" fill="none" stroke="#CBD8C4" stroke-width="1.6"/><path d="M112 158c16-10 26 4 40-8s28 2 36-6v34h-76Z" fill="#3E5240"/><g fill="#2F4033"><path d="M128 178l8-26 8 26Zm22 0 9-30 9 30Zm24 0 7-22 7 22Z"/></g>` },
-  { bg: '#F0EADC', ink: '#C8BC9F', txt: '#5D5544', art: `<g stroke="#C8BC9F" stroke-width="1.3" fill="none"><path d="M-10 96c70-40 150 26 220-14s110-26 110-26"/><path d="M-10 116c70-40 150 26 220-14s110-26 110-26"/><path d="M-10 136c70-40 150 26 220-14s110-26 110-26"/><path d="M-10 158c70-40 150 26 220-14s110-26 110-26"/><path d="M-10 180c70-40 150 26 220-14s110-26 110-26"/><path d="M-10 202c70-40 150 26 220-14s110-26 110-26"/></g><circle cx="196" cy="150" r="2" fill="#C8BC9F"/>` },
-  { bg: '#D3A392', ink: '#F0DDD4', txt: '#5E3B30', art: `<path d="M124 186c-6-22-2-38 26-38s34 16 28 38Z" fill="#C08C79"/><path d="M150 148v-38" stroke="#7C4E3F" stroke-width="1.6"/><path d="M150 122c-14-4-20-14-18-24 12-1 18 9 18 24Zm0 16c14-4 20-14 18-24-12-1-18 9-18 24Z" fill="none" stroke="#7C4E3F" stroke-width="1.6"/><circle cx="176" cy="140" r="26" fill="#C79A88" opacity="0.55"/>` },
+// Обложки книг без собственной картинки (нет обложки в самом файле, или это
+// PDF-скан без текста) — набор готовых иллюстраций вместо SVG-заглушек с
+// текстом поверх. Текст (название, автор) не дублируем на самой картинке: он
+// уже показывается отдельной строкой рядом с обложкой везде, где она
+// используется (bookCard, меню книги) — то же самое верно и для настоящих
+// обложек из PDF/EPUB, у них тоже никогда не было текста поверх.
+const PLACEHOLDER_COVERS = [
+  'covers/cover-forest-river.webp',
+  'covers/cover-sunset-cliff.webp',
+  'covers/cover-castle.webp',
+  'covers/cover-waterfall.webp',
+  'covers/cover-sailboat.webp',
+  'covers/cover-arch-mountains.webp',
+  'covers/cover-arch-leaves.webp',
+  'covers/cover-arch-moonphases.webp',
+  'covers/cover-deer.webp',
 ];
 
 function hashCode(str) {
@@ -1250,24 +1255,12 @@ function hashCode(str) {
   return Math.abs(h);
 }
 
-function wrapText(text, maxChars, maxLines) {
-  const words = String(text || '').split(/\s+/).filter(Boolean);
-  const lines = [];
-  let line = '';
-  for (const w of words) {
-    if (!line) line = w;
-    else if ((line + ' ' + w).length <= maxChars) line += ' ' + w;
-    else { lines.push(line); line = w; }
-    if (lines.length === maxLines) break;
-  }
-  if (line && lines.length < maxLines) lines.push(line);
-  if (lines.length === maxLines && words.join(' ').length > lines.join(' ').length) {
-    lines[maxLines - 1] = lines[maxLines - 1].replace(/.{0,2}$/, '…');
-  }
-  return lines;
+// Выбор обложки — по хэшу id/имени файла, не случайный: у одной и той же
+// книги обложка не должна меняться между открытиями или устройствами.
+function placeholderCover(book) {
+  const src = PLACEHOLDER_COVERS[hashCode(book.id || book.name || '') % PLACEHOLDER_COVERS.length];
+  return `<img src="${src}" alt="">`;
 }
-
-const esc = s => String(s || '').replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
 
 // Ключ для поиска: без ударений и без разницы между обычной и конечной сигмой.
 // По-гречески иначе не найти — в названии файла стоит «αύριο», а с клавиатуры
@@ -1279,20 +1272,6 @@ const searchKey = s => String(s || '')
   .replace(/[̀-ͯ]/g, '')
   .replace(/ς/g, 'σ')
   .trim();
-
-function placeholderCover(book) {
-  const t = COVER_TEMPLATES[hashCode(book.id || book.name || '') % COVER_TEMPLATES.length];
-  const titleLines = wrapText((book.title || stripExt(book.name)).toUpperCase(), 16, 3);
-  const startY = 300 - (titleLines.length - 1) * 15;
-  const tspans = titleLines
-    .map((l, i) => `<tspan x="150" y="${startY + i * 22}">${esc(l)}</tspan>`).join('');
-  const author = book.author ? `<text x="150" y="${startY + titleLines.length * 22 + 12}" text-anchor="middle" font-family="Georgia,serif" font-size="12" fill="${t.txt}" opacity="0.85">${esc(wrapText(book.author, 24, 1)[0])}</text>` : '';
-  return `<svg viewBox="0 0 300 400" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid slice">
-    <rect width="300" height="400" fill="${t.bg}"/>${t.art}
-    <text text-anchor="middle" font-family="Georgia,serif" font-size="17" letter-spacing="1.5" fill="${t.txt}">${tspans}</text>${author}
-    <rect x="0" y="0" width="7" height="400" fill="rgba(0,0,0,0.10)"/>
-  </svg>`;
-}
 
 function coverHTML(book) {
   return book.coverIsOwn && book.coverDataUrl
