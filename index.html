@@ -829,6 +829,20 @@
   <button class="btn-wide done" id="msgOk" type="button">Понятно</button>
 </div>
 
+<!-- Выбор формата перед отправкой в чат — общий и для одной заметки, и для
+     выгрузки всех заметок книги разом (см. pendingExport). Ложится поверх
+     того, откуда вызван (карточка заметки, попап просмотра, меню книги),
+     как и msgSheet — те листы должны остаться под ним, не закрываться. -->
+<div class="sheet" id="exportFormatSheet">
+  <div class="sheet-grip"></div>
+  <div class="msg-title">Как отправить?</div>
+  <div id="exportFormatList">
+    <button class="menu-item" id="fmtMd" type="button"><span>Файлом .md — для Obsidian</span></button>
+    <button class="menu-item" id="fmtTxt" type="button"><span>Файлом .txt — без разметки</span></button>
+    <button class="menu-item" id="fmtChat" type="button"><span>Сообщением в чат</span></button>
+  </div>
+</div>
+
 <div class="reader-note" id="readerNote"></div>
 
 <div class="sel-toolbar" id="selToolbar">
@@ -892,6 +906,8 @@ const ICONS = {
   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a1 1 0 0 1 1-1h9"/>',
   toc: '<path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h10"/>',
   send: '<path d="m3 11.5 18-8-8 18-2.5-7.5L3 11.5Z"/><path d="m10.5 14 10.5-10.5"/>',
+  fileText: '<path d="M7 3h7l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M14 3v4h4"/><path d="M9 13h6M9 17h6"/>',
+  chat: '<path d="M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9l-5 4v-4H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Z"/>',
 };
 const icon = (name, cls = '') => S(ICONS[name], cls ? ' ' + cls : '');
 
@@ -1536,7 +1552,7 @@ async function openBookSheet(id) {
     closeAllSheets(); renderLibrary();
   });
   if ((book.notes || []).length) {
-    add('send', 'Все заметки в Obsidian (' + pluralNotes(book.notes.length) + ')', false, () => exportAllNotesToObsidian(book));
+    add('send', 'Все заметки в Obsidian (' + pluralNotes(book.notes.length) + ')', false, () => openExportFormatSheet({ kind: 'all', book }));
   }
   add('archive', book.archived ? 'Вернуть из архива' : 'В архив', book.archived, async () => {
     await idbUpdateBook(id, { archived: !book.archived });
@@ -2721,6 +2737,40 @@ function notesToMarkdown(notes, book) {
   return header + '\n\n---\n\n' + body + '\n';
 }
 
+// Те же две функции, но без markdown-синтаксиса (#, >, **) — для .txt-файла
+// и для отправки сообщением: у кого-то с той стороны нет Obsidian, и решётки
+// со звёздочками там выглядели бы мусором, а не разметкой.
+function noteToPlainText(nt, book) {
+  const bookTitle = book.title || stripExt(book.name);
+  const unit = book.kind === 'epub' ? 'гл.' : 'стр.';
+  const source = ['«' + bookTitle + '»', book.author, nt.page ? unit + ' ' + nt.page : '']
+    .filter(x => x && String(x).trim()).join(', ');
+  const parts = [];
+  if (nt.title && nt.title.trim()) parts.push(nt.title.trim());
+  parts.push('Источник: ' + source);
+  parts.push(String(nt.text || '').trim());
+  if (nt.translation && nt.translation.trim()) parts.push('Перевод: ' + nt.translation.trim());
+  if (nt.comment && nt.comment.trim()) parts.push('Заметка: ' + nt.comment.trim());
+  return parts.join('\n\n') + '\n';
+}
+
+function notesToPlainText(notes, book) {
+  const bookTitle = book.title || stripExt(book.name);
+  const header = [bookTitle, book.author].filter(Boolean).join('\n');
+  const unit = book.kind === 'epub' ? 'гл.' : 'стр.';
+  const sorted = notes.slice().sort((a, b) => (a.page || 0) - (b.page || 0) || a.createdAt - b.createdAt);
+  const body = sorted.map(nt => {
+    const parts = [];
+    if (nt.title && nt.title.trim()) parts.push(nt.title.trim());
+    if (nt.page) parts.push(unit + ' ' + nt.page);
+    parts.push(String(nt.text || '').trim());
+    if (nt.translation && nt.translation.trim()) parts.push('Перевод: ' + nt.translation.trim());
+    if (nt.comment && nt.comment.trim()) parts.push('Заметка: ' + nt.comment.trim());
+    return parts.join('\n\n');
+  }).join('\n\n———\n\n');
+  return header + '\n\n———\n\n' + body + '\n';
+}
+
 const pluralNotes = n => {
   const mod10 = n % 10, mod100 = n % 100;
   if (mod10 === 1 && mod100 !== 11) return n + ' заметка';
@@ -2784,7 +2834,7 @@ document.getElementById('nvTransCopy').addEventListener('click', () => {
   if (viewingNote) copyAndTell(viewingNote.nt.translation || '');
 });
 document.getElementById('nvObsidian').addEventListener('click', () => {
-  if (viewingNote) exportNoteToObsidian(viewingNote.nt, viewingNote.book);
+  if (viewingNote) openExportFormatSheet({ kind: 'note', nt: viewingNote.nt, book: viewingNote.book });
 });
 document.getElementById('nvOpenBook').addEventListener('click', async () => {
   if (!viewingNote) return;
@@ -2819,7 +2869,10 @@ document.getElementById('msgOk').addEventListener('click', () => {
   updateBackButton();
 });
 
-async function exportNoteToObsidian(nt, book) {
+// format: 'md' (файл с разметкой, по умолчанию), 'txt' (файл без разметки —
+// для тех, кто читает не в Obsidian) или 'chat' (то же содержимое, но прямо
+// сообщением, без файла — быстро прочитать или переслать).
+async function exportNoteToObsidian(nt, book, format = 'md') {
   if (!tg || !tg.initData) {
     showReaderNote('Отправка в чат работает только внутри Telegram', 2600);
     return;
@@ -2830,24 +2883,25 @@ async function exportNoteToObsidian(nt, book) {
   // (название книги + первые слова цитаты, которые часто совпадают).
   const own = nt.title && nt.title.trim();
   const firstWords = String(nt.text || '').trim().split(/\s+/).slice(0, 5).join(' ');
-  const name = (own || (bookTitle + ' — ' + firstWords)).slice(0, 70) + '.md';
-  showReaderNote('Отправляю в чат…', 1500);
+  const baseName = (own || (bookTitle + ' — ' + firstWords)).slice(0, 70);
+  showReaderNote(format === 'chat' ? 'Отправляю сообщением…' : 'Отправляю в чат…', 1500);
   try {
-    const r = await serverFetch('/export?name=' + encodeURIComponent(name), {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/markdown' },
-      body: noteToMarkdown(nt, book),
+    await sendExport({
+      format, baseName,
+      mdBody: () => noteToMarkdown(nt, book),
+      plainBody: () => noteToPlainText(nt, book),
     });
-    if (!r.ok) throw new Error('http ' + r.status);
-    showDialog('Заметка отправлена',
-      'Файл ' + name + ' уже в твоём чате с ботом @Norevia_bot. Открой чат — файл можно открыть в Obsidian или переслать куда нужно.');
+    showDialog('Заметка отправлена', format === 'chat'
+      ? 'Сообщение уже в твоём чате с ботом @Norevia_bot.'
+      : 'Файл ' + baseName + '.' + (format === 'txt' ? 'txt' : 'md') + ' уже в твоём чате с ботом @Norevia_bot.'
+        + (format === 'md' ? ' Открой чат — файл можно открыть в Obsidian или переслать куда нужно.' : ''));
   } catch (e) {
     console.warn('выгрузка заметки не удалась', e);
     showReaderNote('Не получилось отправить — проверь связь и попробуй ещё раз', 2600);
   }
 }
 
-async function exportAllNotesToObsidian(book) {
+async function exportAllNotesToObsidian(book, format = 'md') {
   if (!tg || !tg.initData) {
     showReaderNote('Отправка в чат работает только внутри Telegram', 2600);
     return;
@@ -2855,23 +2909,60 @@ async function exportAllNotesToObsidian(book) {
   const notes = book.notes || [];
   if (!notes.length) return;
   const bookTitle = book.title || stripExt(book.name);
-  const name = (bookTitle + ' — все заметки').slice(0, 70) + '.md';
-  showReaderNote('Собираю заметки…', 1500);
+  const baseName = (bookTitle + ' — все заметки').slice(0, 70);
+  showReaderNote(format === 'chat' ? 'Собираю заметки…' : 'Собираю заметки…', 1500);
   try {
-    const r = await serverFetch('/export?name=' + encodeURIComponent(name), {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/markdown' },
-      body: notesToMarkdown(notes, book),
+    await sendExport({
+      format, baseName,
+      mdBody: () => notesToMarkdown(notes, book),
+      plainBody: () => notesToPlainText(notes, book),
     });
-    if (!r.ok) throw new Error('http ' + r.status);
     closeAllSheets();
-    showDialog('Заметки отправлены',
-      'Файл ' + name + ' (' + pluralNotes(notes.length) + ') уже в твоём чате с ботом @Norevia_bot.');
+    showDialog('Заметки отправлены', format === 'chat'
+      ? pluralNotes(notes.length) + ' сообщением — уже в твоём чате с ботом @Norevia_bot.'
+      : 'Файл ' + baseName + '.' + (format === 'txt' ? 'txt' : 'md') + ' (' + pluralNotes(notes.length) + ') уже в твоём чате с ботом @Norevia_bot.');
   } catch (e) {
     console.warn('выгрузка всех заметок не удалась', e);
     showReaderNote('Не получилось отправить — проверь связь и попробуй ещё раз', 2600);
   }
 }
+
+// Общая отправка на сервер — разница между «файлом» и «сообщением» только в
+// query-параметрах, тело запроса собирает вызывающая функция под нужный формат.
+async function sendExport({ format, baseName, mdBody, plainBody }) {
+  const url = format === 'chat'
+    ? '/export?mode=chat'
+    : '/export?mode=file&ext=' + (format === 'txt' ? 'txt' : 'md') + '&name=' + encodeURIComponent(baseName);
+  const body = format === 'md' ? mdBody() : plainBody();
+  const r = await serverFetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body });
+  if (!r.ok) throw new Error('http ' + r.status);
+}
+
+// ── выбор формата перед отправкой ──
+let pendingExport = null; // { kind: 'note', nt, book } | { kind: 'all', book }
+
+function openExportFormatSheet(target) {
+  pendingExport = target;
+  // Не через openSheet: тот скрыл бы лист, из которого вызвали (карточка
+  // заметки, попап просмотра, меню книги) — этот ложится поверх, как msgSheet.
+  document.getElementById('exportFormatSheet').classList.add('show');
+  document.getElementById('backdrop').classList.add('show');
+  updateBackButton();
+}
+
+async function runPendingExport(format) {
+  const target = pendingExport;
+  pendingExport = null;
+  document.getElementById('exportFormatSheet').classList.remove('show');
+  if (!document.querySelector('.sheet.show')) document.getElementById('backdrop').classList.remove('show');
+  updateBackButton();
+  if (!target) return;
+  if (target.kind === 'note') await exportNoteToObsidian(target.nt, target.book, format);
+  else await exportAllNotesToObsidian(target.book, format);
+}
+document.getElementById('fmtMd').addEventListener('click', () => runPendingExport('md'));
+document.getElementById('fmtTxt').addEventListener('click', () => runPendingExport('txt'));
+document.getElementById('fmtChat').addEventListener('click', () => runPendingExport('chat'));
 
 // ── переход по книге ──
 function goToPage(num) {
@@ -4440,11 +4531,15 @@ document.getElementById('noteCopyTranslation').addEventListener('click', () => {
 });
 document.getElementById('noteObsidian').addEventListener('click', () => {
   if (!editingNote || !currentBook) return;
-  exportNoteToObsidian({
-    ...editingNote,
-    title: document.getElementById('noteTitleInput').value,
-    comment: document.getElementById('noteInput').value,
-  }, currentBook);
+  openExportFormatSheet({
+    kind: 'note',
+    nt: {
+      ...editingNote,
+      title: document.getElementById('noteTitleInput').value,
+      comment: document.getElementById('noteInput').value,
+    },
+    book: currentBook,
+  });
 });
 document.getElementById('noteDelete').addEventListener('click', async () => {
   if (!editingNote) return;
@@ -4467,6 +4562,9 @@ document.getElementById('chromeBookmark').innerHTML = icon('bookmark');
 document.getElementById('jumpClose').innerHTML = icon('close', 'icon-sm');
 document.getElementById('chromeMenu').innerHTML = icon('more');
 document.getElementById('chromeToc').innerHTML = icon('toc');
+document.getElementById('fmtMd').innerHTML = icon('note') + '<span>Файлом .md — для Obsidian</span>';
+document.getElementById('fmtTxt').innerHTML = icon('fileText') + '<span>Файлом .txt — без разметки</span>';
+document.getElementById('fmtChat').innerHTML = icon('chat') + '<span>Сообщением в чат</span>';
 document.getElementById('tpClose').innerHTML = icon('close', 'icon-sm');
 // Кнопка существовала с первого дня панели, но иконку ей никто не назначал —
 // в панели выделения торчал пустой безымянный огрызок.
