@@ -549,6 +549,17 @@
     margin-bottom: 12px;
   }
   .note-input:focus { border-color: var(--accent); }
+  /* Своё название заметки — без него имя файла в Obsidian склеивалось из
+     названия книги и первых слов цитаты, и у книги с несколькими заметками
+     они были почти неотличимы в списке чата. */
+  .note-title-input {
+    width: 100%; border: 1px solid var(--border); border-radius: 13px;
+    background: var(--bg); color: var(--text);
+    padding: 11px 13px; font-size: 15px; font-weight: 700; font-family: inherit; outline: none;
+    margin-bottom: 4px;
+  }
+  .note-title-input:focus { border-color: var(--accent); }
+  .note-title-input::placeholder { font-weight: 400; color: var(--muted); }
   .sheet-actions { display: flex; gap: 9px; }
 
   /* ══════════════ СПИСКИ (закладки, заметки, слова) ══════════════ */
@@ -766,6 +777,8 @@
     <div class="note-quote" id="noteQuote"></div>
     <button class="row-act" id="noteCopyOriginal" type="button" aria-label="Скопировать оригинал"></button>
   </div>
+  <input class="note-title-input" id="noteTitleInput" type="text" maxlength="120" placeholder="Название заметки">
+  <div class="set-hint" style="margin:0 0 14px;">Если оставить пустым, .md-файл в Obsidian назовётся книгой и началом цитаты — у нескольких заметок одной книги имена будут почти одинаковые.</div>
   <details class="note-acc" id="noteTransAcc">
     <summary>Перевод</summary>
     <div class="note-acc-body">
@@ -793,6 +806,7 @@
     <span class="nv-spacer"></span>
     <button class="row-act" id="nvClose" type="button" aria-label="Закрыть"></button>
   </div>
+  <div class="msg-title" id="nvTitle" style="display:none;"></div>
   <div class="note-quote" id="nvQuote"></div>
   <details class="note-acc" id="nvTransAcc">
     <summary>Перевод</summary>
@@ -1521,6 +1535,9 @@ async function openBookSheet(id) {
     await idbUpdateBook(id, { favorite: !book.favorite });
     closeAllSheets(); renderLibrary();
   });
+  if ((book.notes || []).length) {
+    add('send', 'Все заметки в Obsidian (' + pluralNotes(book.notes.length) + ')', false, () => exportAllNotesToObsidian(book));
+  }
   add('archive', book.archived ? 'Вернуть из архива' : 'В архив', book.archived, async () => {
     await idbUpdateBook(id, { archived: !book.archived });
     closeAllSheets(); renderLibrary();
@@ -2670,16 +2687,46 @@ const noteToText = nt => [nt.text, nt.translation, nt.comment].filter(x => x && 
 // чата его одним касанием открывают в Obsidian. Разделы, которых нет
 // (перевод у маркера, пустой комментарий), просто пропускаются.
 function noteToMarkdown(nt, book) {
-  const title = book.title || stripExt(book.name);
+  const bookTitle = book.title || stripExt(book.name);
   const unit = book.kind === 'epub' ? 'гл.' : 'стр.';
-  const source = ['«' + title + '»', book.author, nt.page ? unit + ' ' + nt.page : '']
+  const source = ['«' + bookTitle + '»', book.author, nt.page ? unit + ' ' + nt.page : '']
     .filter(x => x && String(x).trim()).join(', ');
-  const parts = ['Источник: ' + source];
+  const parts = [];
+  if (nt.title && nt.title.trim()) parts.push('# ' + nt.title.trim());
+  parts.push('Источник: ' + source);
   parts.push('> ' + String(nt.text || '').trim().replace(/\n/g, '\n> '));
   if (nt.translation && nt.translation.trim()) parts.push('**Перевод:** ' + nt.translation.trim());
   if (nt.comment && nt.comment.trim()) parts.push('**Заметка:** ' + nt.comment.trim());
   return parts.join('\n\n') + '\n';
 }
+
+// Пока читаешь одну книгу за один присест, набегает несколько заметок — а
+// каждую по отдельности в чат слать долго. Один файл со всеми, разделёнными
+// чертой, отсортированными по номеру страницы (а не по времени создания —
+// так порядок совпадает с тем, как отрывки идут в самой книге).
+function notesToMarkdown(notes, book) {
+  const bookTitle = book.title || stripExt(book.name);
+  const header = ['# ' + bookTitle, book.author].filter(Boolean).join('\n');
+  const unit = book.kind === 'epub' ? 'гл.' : 'стр.';
+  const sorted = notes.slice().sort((a, b) => (a.page || 0) - (b.page || 0) || a.createdAt - b.createdAt);
+  const body = sorted.map(nt => {
+    const parts = [];
+    if (nt.title && nt.title.trim()) parts.push('## ' + nt.title.trim());
+    if (nt.page) parts.push(unit + ' ' + nt.page);
+    parts.push('> ' + String(nt.text || '').trim().replace(/\n/g, '\n> '));
+    if (nt.translation && nt.translation.trim()) parts.push('**Перевод:** ' + nt.translation.trim());
+    if (nt.comment && nt.comment.trim()) parts.push('**Заметка:** ' + nt.comment.trim());
+    return parts.join('\n\n');
+  }).join('\n\n---\n\n');
+  return header + '\n\n---\n\n' + body + '\n';
+}
+
+const pluralNotes = n => {
+  const mod10 = n % 10, mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return n + ' заметка';
+  if ([2, 3, 4].includes(mod10) && ![12, 13, 14].includes(mod100)) return n + ' заметки';
+  return n + ' заметок';
+};
 
 // ── всплывающее сообщение с кнопкой ──
 function showDialog(title, text) {
@@ -2698,6 +2745,9 @@ let viewingNote = null; // {nt, book}
 
 function openNoteView(nt, book) {
   viewingNote = { nt, book };
+  const nvTitle = document.getElementById('nvTitle');
+  nvTitle.textContent = nt.title || '';
+  nvTitle.style.display = nt.title && nt.title.trim() ? '' : 'none';
   const nvQuote = document.getElementById('nvQuote');
   nvQuote.textContent = nt.text;
   nvQuote.style.borderLeftColor = hlHex(nt.color);
@@ -2774,9 +2824,13 @@ async function exportNoteToObsidian(nt, book) {
     showReaderNote('Отправка в чат работает только внутри Telegram', 2600);
     return;
   }
-  const title = book.title || stripExt(book.name);
+  const bookTitle = book.title || stripExt(book.name);
+  // Своё название — если задано в поле выше — идёт прямо в имя файла:
+  // иначе у книги с несколькими заметками файлы называются почти одинаково
+  // (название книги + первые слова цитаты, которые часто совпадают).
+  const own = nt.title && nt.title.trim();
   const firstWords = String(nt.text || '').trim().split(/\s+/).slice(0, 5).join(' ');
-  const name = (title + ' — ' + firstWords).slice(0, 70) + '.md';
+  const name = (own || (bookTitle + ' — ' + firstWords)).slice(0, 70) + '.md';
   showReaderNote('Отправляю в чат…', 1500);
   try {
     const r = await serverFetch('/export?name=' + encodeURIComponent(name), {
@@ -2789,6 +2843,32 @@ async function exportNoteToObsidian(nt, book) {
       'Файл ' + name + ' уже в твоём чате с ботом @Norevia_bot. Открой чат — файл можно открыть в Obsidian или переслать куда нужно.');
   } catch (e) {
     console.warn('выгрузка заметки не удалась', e);
+    showReaderNote('Не получилось отправить — проверь связь и попробуй ещё раз', 2600);
+  }
+}
+
+async function exportAllNotesToObsidian(book) {
+  if (!tg || !tg.initData) {
+    showReaderNote('Отправка в чат работает только внутри Telegram', 2600);
+    return;
+  }
+  const notes = book.notes || [];
+  if (!notes.length) return;
+  const bookTitle = book.title || stripExt(book.name);
+  const name = (bookTitle + ' — все заметки').slice(0, 70) + '.md';
+  showReaderNote('Собираю заметки…', 1500);
+  try {
+    const r = await serverFetch('/export?name=' + encodeURIComponent(name), {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/markdown' },
+      body: notesToMarkdown(notes, book),
+    });
+    if (!r.ok) throw new Error('http ' + r.status);
+    closeAllSheets();
+    showDialog('Заметки отправлены',
+      'Файл ' + name + ' (' + pluralNotes(notes.length) + ') уже в твоём чате с ботом @Norevia_bot.');
+  } catch (e) {
+    console.warn('выгрузка всех заметок не удалась', e);
     showReaderNote('Не получилось отправить — проверь связь и попробуй ещё раз', 2600);
   }
 }
@@ -3633,6 +3713,7 @@ function openNoteSheet(note) {
   // Полоса слева — цветом самого маркера: иначе розовое выделение открывается
   // карточкой с зелёной полосой, и связь с текстом теряется.
   quoteEl.style.borderLeftColor = hlHex(note.color);
+  document.getElementById('noteTitleInput').value = note.title || '';
   document.getElementById('noteInput').value = note.comment || '';
   // Перевод — свёрнутым аккордеоном у каждой заметки: если его ещё нет
   // (маркер без панели перевода, старая запись), подгрузится при раскрытии.
@@ -3970,7 +4051,7 @@ async function renderNotes() {
     main.innerHTML = `
       <div class="note-row-title"><span class="hl-dot" style="background:${hlHex(nt.color)}"></span><span class="t"></span></div>
       <div class="row-sub"><span class="bk"></span></div>`;
-    main.querySelector('.t').textContent = nt.text;
+    main.querySelector('.t').textContent = (nt.title && nt.title.trim()) || nt.text;
     main.querySelector('.bk').textContent =
       [book.title || stripExt(book.name), book.author].filter(Boolean).join(' · ');
     main.addEventListener('click', () => openNoteView(nt, book));
@@ -4330,9 +4411,11 @@ document.getElementById('brightnessSlider').addEventListener('input', e => {
 });
 document.getElementById('noteSave').addEventListener('click', async () => {
   if (!editingNote) return;
+  editingNote.title = document.getElementById('noteTitleInput').value.trim();
   editingNote.comment = document.getElementById('noteInput').value.trim();
   await persistNote();
   closeAllSheets();
+  if (activeTab === 'view-notes') renderNotes();
 });
 document.getElementById('noteCopy').addEventListener('click', () => {
   if (!editingNote) return;
@@ -4357,7 +4440,11 @@ document.getElementById('noteCopyTranslation').addEventListener('click', () => {
 });
 document.getElementById('noteObsidian').addEventListener('click', () => {
   if (!editingNote || !currentBook) return;
-  exportNoteToObsidian({ ...editingNote, comment: document.getElementById('noteInput').value }, currentBook);
+  exportNoteToObsidian({
+    ...editingNote,
+    title: document.getElementById('noteTitleInput').value,
+    comment: document.getElementById('noteInput').value,
+  }, currentBook);
 });
 document.getElementById('noteDelete').addEventListener('click', async () => {
   if (!editingNote) return;
